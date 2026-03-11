@@ -8,12 +8,12 @@
 // ============================================================
 
 // ngrok URL (already includes https)
-const NGROK_URL = 'https://inequilateral-hilda-nonfeloniously.ngrok-free.dev';
+const NGROK_URL = 'https://diamond-unwrested-unadvantageously.ngrok-free.dev/';
 
-export const API_BASE_URL = NGROK_URL;
+// export const API_BASE_URL = NGROK_URL;
 
 // For Android Emulator local testing:
-// export const API_BASE_URL = 'http://10.0.2.2:5002';
+export const API_BASE_URL = 'http://192.168.137.136:5002';
 
 // For iOS Simulator local testing:
 // export const API_BASE_URL = 'http://localhost:5002';
