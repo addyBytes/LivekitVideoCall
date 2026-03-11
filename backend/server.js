@@ -17,11 +17,12 @@ const PORT = 5002;
 // ============================================================
 // LiveKit Configuration (Replace with your credentials)
 // ============================================================
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "Your key";
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'APIRqqt6XSrLUU3';
+
 const LIVEKIT_API_SECRET =
-  process.env.LIVEKIT_API_SECRET || "your secret";
+  process.env.LIVEKIT_API_SECRET || 'kR1cbkqfjxekQSHW486Nol4VxleeQ3UfUzufnveUw1bM' ;
 const LIVEKIT_URL =
-  process.env.LIVEKIT_URL || "your url";
+  process.env.LIVEKIT_URL || "wss://vc-iflnvq5g.livekit.cloud";
 
 // ============================================================
 // In-memory room tracking
@@ -32,7 +33,6 @@ const rooms = new Map();
 
 app.use(cors());
 app.use(express.json());
-
 
 app.get("/", (req, res) => {
   res.json({

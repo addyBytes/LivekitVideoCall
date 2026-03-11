@@ -23,6 +23,8 @@ import {
 } from 'react-native';
 import { registerGlobals } from '@livekit/react-native';
 import VideoCallScreen from './src/screens/VideoCallScreen';
+import AudioCallScreen from './src/screens/AudioCallScreen';
+import type { CallType } from './src/types';
 
 // Register LiveKit globals (WebRTC polyfills)
 registerGlobals();
@@ -69,6 +71,7 @@ const App: React.FC = () => {
   const [roomName, setRoomName] = useState('');
   const [participantName, setParticipantName] = useState('');
   const [inCall, setInCall] = useState(false);
+  const [callType, setCallType] = useState<CallType>('video');
   const [error, setError] = useState('');
   const [permissionsGranted, setPermissionsGranted] = useState(false);
 
@@ -79,7 +82,7 @@ const App: React.FC = () => {
     });
   }, []);
 
-  const handleJoinRoom = async () => {
+  const handleJoinRoom = async (type: CallType) => {
     setError('');
 
     if (!roomName.trim()) {
@@ -102,11 +105,12 @@ const App: React.FC = () => {
     }
 
     console.log(`\n========================`);
-    console.log(`  JOINING ROOM`);
+    console.log(`  JOINING ROOM (${type.toUpperCase()})`);
     console.log(`  Room: ${roomName.trim()}`);
     console.log(`  User: ${participantName.trim()}`);
     console.log(`========================\n`);
 
+    setCallType(type);
     setInCall(true);
   };
 
@@ -116,8 +120,17 @@ const App: React.FC = () => {
     setParticipantName('');
   };
 
-  // If in a call, show the VideoCallScreen
+  // If in a call, show the appropriate screen
   if (inCall) {
+    if (callType === 'audio') {
+      return (
+        <AudioCallScreen
+          roomName={roomName.trim()}
+          participantName={participantName.trim()}
+          onLeave={handleLeaveCall}
+        />
+      );
+    }
     return (
       <VideoCallScreen
         roomName={roomName.trim()}
@@ -175,13 +188,22 @@ const App: React.FC = () => {
           {/* Error Message */}
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-          {/* Join Button */}
+          {/* Join Audio Call Button */}
           <TouchableOpacity
             style={styles.joinButton}
-            onPress={handleJoinRoom}
+            onPress={() => handleJoinRoom('audio')}
             activeOpacity={0.8}
           >
-            <Text style={styles.joinButtonText}>Join Room</Text>
+            <Text style={styles.joinButtonText}>🎙️  Join Audio Call</Text>
+          </TouchableOpacity>
+
+          {/* Join Video Call Button */}
+          <TouchableOpacity
+            style={[styles.joinButton, styles.videoCallButton]}
+            onPress={() => handleJoinRoom('video')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.joinButtonText}>📹  Join Video Call</Text>
           </TouchableOpacity>
         </View>
 
@@ -270,6 +292,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 6,
+  },
+  videoCallButton: {
+    backgroundColor: '#10b981',
+    shadowColor: '#10b981',
+    marginTop: 12,
   },
   joinButtonText: {
     color: '#ffffff',

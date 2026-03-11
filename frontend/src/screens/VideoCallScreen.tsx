@@ -28,7 +28,7 @@ import {
   AudioSession,
   isTrackReference,
 } from '@livekit/react-native';
-import { Track } from 'livekit-client';
+import { Track, RoomEvent } from 'livekit-client';
 import { API_BASE_URL } from '../config/api';
 import VideoTile from '../components/VideoTile';
 import ParticipantList from '../components/ParticipantList';
@@ -131,13 +131,43 @@ const RoomContent: React.FC<RoomContentProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Debug: Monitor room events for connectivity
+  useEffect(() => {
+    const onStateChange = (state: string) => {
+      console.log(`[Room] Connection state changed: ${state}`);
+    };
+    const onParticipantConnected = (p: any) => {
+      console.log(`[Room] Remote participant connected: ${p.name || p.identity}`);
+    };
+    const onParticipantDisconnected = (p: any) => {
+      console.log(`[Room] Remote participant disconnected: ${p.name || p.identity}`);
+    };
+    const onTrackSubscribed = (track: any, pub: any, participant: any) => {
+      console.log(`[Room] Track subscribed: ${track.kind} from ${participant.name || participant.identity}`);
+    };
+
+    room.on(RoomEvent.ConnectionStateChanged, onStateChange);
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+
+    console.log(`[Room] Initial state: ${room.state}, Remote participants: ${room.remoteParticipants.size}`);
+
+    return () => {
+      room.off(RoomEvent.ConnectionStateChanged, onStateChange);
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
+      room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    };
+  }, [room]);
+
   // Get all video tracks
   const tracks = useTracks(
     [
       { source: Track.Source.Camera, withPlaceholder: true },
       { source: Track.Source.ScreenShare, withPlaceholder: false },
     ],
-    { onlySubscribed: true },
+    { onlySubscribed: false },
   );
 
   // Filter to video tracks only
@@ -580,7 +610,9 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         options={{
           adaptiveStream: true,
           dynacast: false,
-          
+        }}
+        connectOptions={{
+          autoSubscribe: true,
         }}
         audio={true}
         video={true}

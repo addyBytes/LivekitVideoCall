@@ -72,6 +72,11 @@ export interface ParticipantListProps {
 }
 
 /**
+ * Call type - audio only or video
+ */
+export type CallType = 'audio' | 'video';
+
+/**
  * Props for the ControlsBar component
  */
 export interface ControlsBarProps {
@@ -82,4 +87,13 @@ export interface ControlsBarProps {
   onLeaveRoom: () => void;
   onToggleParticipants: () => void;
   participantCount: number;
+}
+
+/**
+ * Props for the AudioCallScreen
+ */
+export interface AudioCallScreenProps {
+  roomName: string;
+  participantName: string;
+  onLeave: () => void;
 }
