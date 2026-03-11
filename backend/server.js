@@ -17,11 +17,11 @@ const PORT = 5002;
 // ============================================================
 // LiveKit Configuration (Replace with your credentials)
 // ============================================================
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "APIRqqt6XSrLUU3";
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 
 const LIVEKIT_API_SECRET =
-  process.env.LIVEKIT_API_SECRET || "kR1cbkqfjxekQSHW486Nol4VxleeQ3UfUzufnveUw1bM";
+  process.env.LIVEKIT_API_SECRET || 
 const LIVEKIT_URL =
-  process.env.LIVEKIT_URL || "wss://vc-iflnvq5g.livekit.cloud";
+  process.env.LIVEKIT_URL ||
 
 // ============================================================
 // In-memory room tracking
