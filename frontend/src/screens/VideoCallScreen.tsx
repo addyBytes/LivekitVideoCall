@@ -98,6 +98,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const [currentPage, setCurrentPage] = useState(0);
   const pageScrollRef = useRef<ScrollView>(null);
   const mediaEnabledRef = useRef(false);
+  const [, setTrackUpdate] = useState(0);
 
   // Listen for dimension changes (rotation)
   useEffect(() => {
@@ -144,12 +145,18 @@ const RoomContent: React.FC<RoomContentProps> = ({
     };
     const onTrackSubscribed = (track: any, pub: any, participant: any) => {
       console.log(`[Room] Track subscribed: ${track.kind} from ${participant.name || participant.identity}`);
+      setTrackUpdate(prev => prev + 1);
+    };
+    const onTrackUnsubscribed = (track: any, pub: any, participant: any) => {
+      console.log(`[Room] Track unsubscribed: ${track.kind} from ${participant.name || participant.identity}`);
+      setTrackUpdate(prev => prev + 1);
     };
 
     room.on(RoomEvent.ConnectionStateChanged, onStateChange);
     room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
     room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
     room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
 
     console.log(`[Room] Initial state: ${room.state}, Remote participants: ${room.remoteParticipants.size}`);
 
@@ -158,6 +165,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
       room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
       room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+      room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
     };
   }, [room]);
 
@@ -474,6 +482,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('idle');
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [audioReady, setAudioReady] = useState(false);
 
   // Fetch token from backend
   useEffect(() => {
@@ -536,13 +545,33 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     fetchToken();
   }, [roomName, participantName]);
 
-  // Configure audio session for React Native
+  // Configure audio session for React Native — MUST complete before LiveKitRoom connects
   useEffect(() => {
     const configureAudio = async () => {
       try {
+        await AudioSession.configureAudio({
+          android: {
+            preferredOutputList: ['speaker'],
+            audioTypeOptions: {
+              manageAudioFocus: true,
+              audioMode: 'inCommunication',
+              audioStreamType: 'voiceCall',
+              audioFocusMode: 'gain',
+              audioAttributesUsageType: 'voiceCommunication',
+              audioAttributesContentType: 'speech',
+              forceHandleAudioRouting: true,
+            },
+          },
+          ios: {
+            defaultOutput: 'speaker',
+          },
+        });
         await AudioSession.startAudioSession();
+        console.log('[Audio] Session configured and started');
+        setAudioReady(true);
       } catch (error) {
         console.error('Failed to start audio session:', error);
+        setAudioReady(true); // still allow connection attempt
       }
     };
 
@@ -600,8 +629,8 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     );
   }
 
-  // Connected - render LiveKit room
-  if (token && livekitUrl) {
+  // Connected - render LiveKit room (only after audio session is ready)
+  if (token && livekitUrl && audioReady) {
     return (
       <LiveKitRoom
         serverUrl={livekitUrl}
