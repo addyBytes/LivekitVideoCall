@@ -16,7 +16,7 @@ const getInitials = (name: string) =>
     .toUpperCase()
     .substring(0, 2);
 
-const VideoTile: React.FC<VideoTileProps> = ({
+const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
   trackRef,
   participantName,
   participantId,
@@ -95,9 +95,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#1a1a2e',
     position: 'relative',
+    borderWidth: 3,
+    borderColor: 'transparent',
   },
   speaking: {
-    borderWidth: 3,
     borderColor: '#00d4aa',
   },
   videoView: {
@@ -186,4 +187,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default React.memo(VideoTile);
+export default VideoTile;

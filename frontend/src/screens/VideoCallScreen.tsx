@@ -98,7 +98,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const [currentPage, setCurrentPage] = useState(0);
   const pageScrollRef = useRef<ScrollView>(null);
   const mediaEnabledRef = useRef(false);
-  const [, setTrackUpdate] = useState(0);
+  const [trackUpdate, setTrackUpdate] = useState(0);
 
   // Listen for dimension changes (rotation)
   useEffect(() => {
@@ -151,12 +151,27 @@ const RoomContent: React.FC<RoomContentProps> = ({
       console.log(`[Room] Track unsubscribed: ${track.kind} from ${participant.name || participant.identity}`);
       setTrackUpdate(prev => prev + 1);
     };
+    const onTrackSubscriptionStatusChanged = (pub: any, status: any, participant: any) => {
+      console.log(`[Room] Track subscription status changed: ${pub.source} -> ${status} from ${participant.name || participant.identity}`);
+      setTrackUpdate(prev => prev + 1);
+    };
+    const onTrackPublished = (pub: any, participant: any) => {
+      console.log(`[Room] Track published: ${pub.source} from ${participant.name || participant.identity}`);
+      setTrackUpdate(prev => prev + 1);
+    };
+    const onTrackUnpublished = (pub: any, participant: any) => {
+      console.log(`[Room] Track unpublished: ${pub.source} from ${participant.name || participant.identity}`);
+      setTrackUpdate(prev => prev + 1);
+    };
 
     room.on(RoomEvent.ConnectionStateChanged, onStateChange);
     room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
     room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
     room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
     room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+    room.on(RoomEvent.TrackSubscriptionStatusChanged, onTrackSubscriptionStatusChanged);
+    room.on(RoomEvent.TrackPublished, onTrackPublished);
+    room.on(RoomEvent.TrackUnpublished, onTrackUnpublished);
 
     console.log(`[Room] Initial state: ${room.state}, Remote participants: ${room.remoteParticipants.size}`);
 
@@ -166,6 +181,9 @@ const RoomContent: React.FC<RoomContentProps> = ({
       room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
       room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.off(RoomEvent.TrackSubscriptionStatusChanged, onTrackSubscriptionStatusChanged);
+      room.off(RoomEvent.TrackPublished, onTrackPublished);
+      room.off(RoomEvent.TrackUnpublished, onTrackUnpublished);
     };
   }, [room]);
 
@@ -300,20 +318,28 @@ const RoomContent: React.FC<RoomContentProps> = ({
         ? tileSizes.singleHeight
         : tileSizes.twoColHeight;
 
+      // Only pass trackRef when the track is actually subscribed and has media data.
+      // isTrackReference() returns true for published-but-unsubscribed tracks (via
+      // isTrackReferencePublished), which causes VideoTrack to render with no media
+      // (black screen) instead of showing the avatar fallback.
+      const hasSubscribedTrack =
+        isTrackReference(item) && item.publication?.track != null;
+
       return (
         <VideoTile
           key={`${participant.identity}-${item.source}`}
-          trackRef={isTrackReference(item) ? item : undefined}
+          trackRef={hasSubscribedTrack ? item : undefined}
           participantName={participant.name || participant.identity}
           participantId={participant.identity}
           isSpeaking={isSpeaking}
           isLocal={isLocal}
           tileWidth={tileWidth}
           tileHeight={tileHeight}
+          trackUpdate={trackUpdate}
         />
       );
     },
-    [localParticipantId, tileSizes],
+    [localParticipantId, tileSizes, trackUpdate],
   );
 
   // Render one page (up to 4 tiles in a 2×2 grid)
@@ -637,7 +663,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         token={token}
         connect={true}
         options={{
-          adaptiveStream: true,
+          adaptiveStream: false,
           dynacast: false,
         }}
         connectOptions={{
