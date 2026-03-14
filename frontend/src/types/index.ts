@@ -82,8 +82,10 @@ export type CallType = 'audio' | 'video';
 export interface ControlsBarProps {
   isMicEnabled: boolean;
   isCameraEnabled: boolean;
+  isFrontCamera: boolean;
   onToggleMic: () => void;
   onToggleCamera: () => void;
+  onSwitchCamera: () => void;
   onLeaveRoom: () => void;
   onToggleParticipants: () => void;
   participantCount: number;

@@ -28,7 +28,7 @@ import {
   AudioSession,
   isTrackReference,
 } from '@livekit/react-native';
-import { Track, RoomEvent } from 'livekit-client';
+import { Track, Room, RoomEvent } from 'livekit-client';
 import { API_BASE_URL } from '../config/api';
 import VideoTile from '../components/VideoTile';
 import ParticipantList from '../components/ParticipantList';
@@ -93,6 +93,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const participants = useParticipants();
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
+  const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [showParticipants, setShowParticipants] = useState(false);
   const [dimensions, setDimensions] = useState(Dimensions.get('window'));
   const [currentPage, setCurrentPage] = useState(0);
@@ -114,14 +115,14 @@ const RoomContent: React.FC<RoomContentProps> = ({
     mediaEnabledRef.current = true;
     const enableMedia = async () => {
       try {
-        await room.localParticipant.setCameraEnabled(true , {
-        resolution: {
-          width: 640,
-          height: 480,
-        },
-        frameRate: 30,
-        
-      });
+        await room.localParticipant.setCameraEnabled(true, {
+          resolution: {
+            width: 640,
+            height: 480,
+          },
+          frameRate: 30,
+          facingMode: 'user',
+        });
         await room.localParticipant.setMicrophoneEnabled(true);
         console.log('[Media] Camera and mic enabled');
       } catch (error) {
@@ -267,13 +268,130 @@ const RoomContent: React.FC<RoomContentProps> = ({
   // Toggle camera
   const handleToggleCamera = useCallback(async () => {
     try {
-      await room.localParticipant.setCameraEnabled(!isCameraEnabled);
-      setIsCameraEnabled(!isCameraEnabled);
-      console.log(`[Camera] ${!isCameraEnabled ? 'Enabled' : 'Disabled'}`);
+      const nextEnabled = !isCameraEnabled;
+      if (nextEnabled) {
+        // Re-enable with the currently selected camera side.
+        await room.localParticipant.setCameraEnabled(true, {
+          resolution: {
+            width: 640,
+            height: 480,
+          },
+          frameRate: 30,
+          facingMode: isFrontCamera ? 'user' : 'environment',
+        });
+      } else {
+        await room.localParticipant.setCameraEnabled(false);
+      }
+
+      setIsCameraEnabled(nextEnabled);
+      console.log(`[Camera] ${nextEnabled ? 'Enabled' : 'Disabled'}`);
     } catch (error) {
       console.error('Failed to toggle camera:', error);
     }
-  }, [room, isCameraEnabled]);
+  }, [room, isCameraEnabled, isFrontCamera]);
+
+  // Switch front/back camera while keeping current enabled state
+  const handleSwitchCamera = useCallback(async () => {
+    if (!isCameraEnabled) return;
+
+    try {
+      const nextIsFront = !isFrontCamera;
+      const nextFacingMode = nextIsFront ? 'user' : 'environment';
+
+      // Get currently published local camera track.
+      const cameraPublication = room.localParticipant.getTrackPublication(
+        Track.Source.Camera,
+      );
+      const localVideoTrack = cameraPublication?.videoTrack;
+
+      if (!localVideoTrack) {
+        // If no track exists (edge case), publish camera with target facing mode.
+        await room.localParticipant.setCameraEnabled(true, {
+          resolution: {
+            width: 640,
+            height: 480,
+          },
+          frameRate: 30,
+          facingMode: nextFacingMode,
+        });
+      } else {
+        const mediaTrack = localVideoTrack.mediaStreamTrack as any;
+        const settings = mediaTrack?.getSettings?.() ?? {};
+        const currentDeviceId = settings.deviceId as string | undefined;
+
+        // Primary path: switch by explicit deviceId for better cross-device behavior.
+        const videoDevices = await Room.getLocalDevices('videoinput', true);
+        if (videoDevices.length >= 2) {
+          const frontRegex = /(front|user|selfie)/i;
+          const backRegex = /(back|rear|environment)/i;
+          const targetRegex = nextIsFront ? frontRegex : backRegex;
+
+          let targetDevice =
+            videoDevices.find(
+              d => d.deviceId !== currentDeviceId && targetRegex.test(d.label || ''),
+            ) ??
+            videoDevices.find(d => d.deviceId !== currentDeviceId);
+
+          if (!targetDevice && currentDeviceId) {
+            const currentIdx = videoDevices.findIndex(d => d.deviceId === currentDeviceId);
+            if (currentIdx >= 0) {
+              targetDevice = videoDevices[(currentIdx + 1) % videoDevices.length];
+            }
+          }
+
+          if (targetDevice && targetDevice.deviceId !== currentDeviceId) {
+            const switched = await localVideoTrack.setDeviceId(targetDevice.deviceId);
+            if (switched) {
+              setIsFrontCamera(nextIsFront);
+              console.log(`[Camera] Switched to ${nextIsFront ? 'front' : 'back'} camera via deviceId`);
+              return;
+            }
+          }
+        }
+
+        // Primary path: force camera re-acquire with the new facing mode.
+        // This is the most reliable approach on React Native devices.
+        try {
+          await localVideoTrack.restartTrack({
+            resolution: {
+              width: 640,
+              height: 480,
+            },
+            frameRate: 30,
+            facingMode: nextFacingMode,
+          });
+        } catch (restartError) {
+          // Fallback path for devices where restartTrack isn't available/reliable.
+          if (typeof mediaTrack?._switchCamera === 'function') {
+            mediaTrack._switchCamera();
+          } else if (typeof mediaTrack?.applyConstraints === 'function') {
+            await mediaTrack.applyConstraints({
+              facingMode: nextFacingMode,
+            });
+          } else {
+            // Hard fallback: force camera republish with new facing mode.
+            await room.localParticipant.setCameraEnabled(false);
+            await room.localParticipant.setCameraEnabled(true, {
+              resolution: {
+                width: 640,
+                height: 480,
+              },
+              frameRate: 30,
+              facingMode: nextFacingMode,
+            });
+            if (restartError instanceof Error) {
+              console.warn('[Camera] restartTrack failed, used republish fallback:', restartError.message);
+            }
+          }
+        }
+      }
+
+      setIsFrontCamera(nextIsFront);
+      console.log(`[Camera] Switched to ${nextIsFront ? 'front' : 'back'} camera`);
+    } catch (error) {
+      console.error('Failed to switch camera:', error);
+    }
+  }, [room, isCameraEnabled, isFrontCamera]);
 
   // Leave room
   const handleLeaveRoom = useCallback(async () => {
@@ -477,8 +595,10 @@ const RoomContent: React.FC<RoomContentProps> = ({
       <ControlsBar
         isMicEnabled={isMicEnabled}
         isCameraEnabled={isCameraEnabled}
+        isFrontCamera={isFrontCamera}
         onToggleMic={handleToggleMic}
         onToggleCamera={handleToggleCamera}
+        onSwitchCamera={handleSwitchCamera}
         onLeaveRoom={handleLeaveRoom}
         onToggleParticipants={() => setShowParticipants(!showParticipants)}
         participantCount={participants.length}

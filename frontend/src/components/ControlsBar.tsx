@@ -10,8 +10,10 @@ import type {ControlsBarProps} from '../types';
 const ControlsBar: React.FC<ControlsBarProps> = ({
   isMicEnabled,
   isCameraEnabled,
+  isFrontCamera,
   onToggleMic,
   onToggleCamera,
+  onSwitchCamera,
   onLeaveRoom,
   onToggleParticipants,
   participantCount,
@@ -39,6 +41,18 @@ const ControlsBar: React.FC<ControlsBarProps> = ({
         </Text>
         <Text style={styles.buttonLabel}>
           {isCameraEnabled ? 'Cam Off' : 'Cam On'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Camera Switch */}
+      <TouchableOpacity
+        style={[styles.button, !isCameraEnabled && styles.buttonDisabled]}
+        onPress={onSwitchCamera}
+        activeOpacity={0.7}
+        disabled={!isCameraEnabled}>
+        <Text style={styles.buttonIcon}>🔄</Text>
+        <Text style={styles.buttonLabel}>
+          {isFrontCamera ? 'Front' : 'Back'}
         </Text>
       </TouchableOpacity>
 
@@ -74,22 +88,22 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-evenly',
+    justifyContent: 'space-between',
     backgroundColor: '#0f0f23',
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 255, 255, 0.08)',
-    marginBottom:40
+    marginBottom: 40,
   },
   button: {
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     borderRadius: 14,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    minWidth: 72,
+    minWidth: 64,
   },
   buttonDisabled: {
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
