@@ -30,6 +30,7 @@ import {
   isTrackReference,
 } from '@livekit/react-native';
 import { Track, Room, RoomEvent } from 'livekit-client';
+import { Buffer } from 'buffer';
 import { API_BASE_URL } from '../config/api';
 import VideoTile from '../components/VideoTile';
 import ParticipantList from '../components/ParticipantList';
@@ -83,6 +84,52 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const [trackUpdate, setTrackUpdate] = useState(0);
   const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
   const emojiBurstIdRef = useRef(0);
+  const isTogglingScreenShareRef = useRef(false);
+
+  const triggerEmojiBurst = useCallback(
+    (emoji: string) => {
+      const id = emojiBurstIdRef.current++;
+      const x = Math.max(
+        30,
+        Math.min(screenWidth - 180, screenWidth * (0.16 + Math.random() * 0.38)),
+      );
+
+      const burst: EmojiBurst = {
+        id,
+        emoji,
+        x,
+        y: new Animated.Value(0),
+        opacity: new Animated.Value(1),
+        scale: new Animated.Value(0.9),
+      };
+
+      setEmojiBursts(prev => [...prev, burst]);
+
+      Animated.parallel([
+        Animated.timing(burst.y, {
+          toValue: -180,
+          duration: 1200,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(burst.opacity, {
+          toValue: 0,
+          duration: 1200,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(burst.scale, {
+          toValue: 1.25,
+          duration: 1200,
+          easing: Easing.out(Easing.back(1.3)),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setEmojiBursts(prev => prev.filter(item => item.id !== id));
+      });
+    },
+    [screenWidth],
+  );
 
   // Explicitly enable camera and mic — only once on mount
   useEffect(() => {
@@ -148,6 +195,19 @@ const RoomContent: React.FC<RoomContentProps> = ({
     room.on(RoomEvent.TrackSubscriptionStatusChanged, onTrackSubscriptionStatusChanged);
     room.on(RoomEvent.TrackPublished, onTrackPublished);
     room.on(RoomEvent.TrackUnpublished, onTrackUnpublished);
+    // Listen for emoji reactions from other participants
+    const onDataReceived = (payload: Uint8Array, participant: any) => {
+      try {
+        const str = Buffer.from(payload).toString('utf8');
+        const data = JSON.parse(str);
+        if (data.type === 'emoji' && typeof data.emoji === 'string') {
+          triggerEmojiBurst(data.emoji);
+        }
+      } catch (err) {
+        console.warn('Failed to parse received data message:', err);
+      }
+    };
+    room.on(RoomEvent.DataReceived, onDataReceived);
 
     console.log(`[Room] Initial state: ${room.state}, Remote participants: ${room.remoteParticipants.size}`);
 
@@ -160,8 +220,9 @@ const RoomContent: React.FC<RoomContentProps> = ({
       room.off(RoomEvent.TrackSubscriptionStatusChanged, onTrackSubscriptionStatusChanged);
       room.off(RoomEvent.TrackPublished, onTrackPublished);
       room.off(RoomEvent.TrackUnpublished, onTrackUnpublished);
+      room.off(RoomEvent.DataReceived, onDataReceived);
     };
-  }, [room]);
+  }, [room, triggerEmojiBurst]);
 
   // Get camera + screen-share tracks
   const tracks = useTracks(
@@ -297,6 +358,8 @@ const RoomContent: React.FC<RoomContentProps> = ({
   }, [selectedRemoteParticipant]);
 
   const handleToggleScreenShare = useCallback(async () => {
+    if (isTogglingScreenShareRef.current) return;
+    isTogglingScreenShareRef.current = true;
     try {
       const nextSharing = !isScreenSharing;
       await room.localParticipant.setScreenShareEnabled(nextSharing);
@@ -304,52 +367,23 @@ const RoomContent: React.FC<RoomContentProps> = ({
       console.log(`[ScreenShare] ${nextSharing ? 'Enabled' : 'Disabled'}`);
     } catch (error) {
       console.error('Failed to toggle screen sharing:', error);
+    } finally {
+      isTogglingScreenShareRef.current = false;
     }
   }, [room, isScreenSharing]);
 
   const handleSendReaction = useCallback(
     (emoji: string) => {
-      const id = emojiBurstIdRef.current++;
-      const x = Math.max(
-        30,
-        Math.min(screenWidth - 180, screenWidth * (0.16 + Math.random() * 0.38)),
-      );
-
-      const burst: EmojiBurst = {
-        id,
-        emoji,
-        x,
-        y: new Animated.Value(0),
-        opacity: new Animated.Value(1),
-        scale: new Animated.Value(0.9),
-      };
-
-      setEmojiBursts(prev => [...prev, burst]);
-
-      Animated.parallel([
-        Animated.timing(burst.y, {
-          toValue: -180,
-          duration: 1200,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(burst.opacity, {
-          toValue: 0,
-          duration: 1200,
-          easing: Easing.out(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(burst.scale, {
-          toValue: 1.25,
-          duration: 1200,
-          easing: Easing.out(Easing.back(1.3)),
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        setEmojiBursts(prev => prev.filter(item => item.id !== id));
-      });
+      try {
+        const msg = JSON.stringify({ type: 'emoji', emoji });
+        const bytes = Uint8Array.from(Buffer.from(msg, 'utf8'));
+        room.localParticipant.publishData(bytes, { reliable: true });
+      } catch (err) {
+        console.warn('Failed to send emoji reaction:', err);
+      }
+      triggerEmojiBurst(emoji);
     },
-    [screenWidth],
+    [room, triggerEmojiBurst],
   );
 
   const getTrackRefForParticipant = useCallback(
@@ -357,6 +391,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
       if (participantIdentity === localIdentity) {
         return localScreenShareTrackRef ?? localCameraTrackRef;
       }
+
       return (
         getRemoteScreenShareTrackRef(participantIdentity) ??
         getRemoteCameraTrackRef(participantIdentity)
@@ -517,7 +552,6 @@ const RoomContent: React.FC<RoomContentProps> = ({
       console.log(`  LEFT ROOM ${roomName}`);
       console.log(`========================\n`);
 
-      // Notify backend
       try {
         await fetch(`${API_BASE_URL}/leave-room`, {
           method: 'POST',
@@ -528,13 +562,13 @@ const RoomContent: React.FC<RoomContentProps> = ({
           }),
         });
       } catch {
-        // Backend notification is best-effort
+        // Backend notification is best-effort.
       }
 
       await room.disconnect();
-      onLeave();
     } catch (error) {
-      console.error('Failed to leave room:', error);
+      console.error('Error while leaving room:', error);
+    } finally {
       onLeave();
     }
   }, [room, roomName, localParticipantId, onLeave]);
@@ -543,73 +577,67 @@ const RoomContent: React.FC<RoomContentProps> = ({
     <View style={styles.roomContainer}>
       <StatusBar barStyle="light-content" backgroundColor="#0a0a1a" />
 
-      {/* Room Header */}
       <View style={styles.roomHeader}>
         <Text style={styles.roomTitle}>{roomName}</Text>
-        <Text style={styles.roomSubtitle}>
-          {participants.length} participant
-          {participants.length !== 1 ? 's' : ''}
-        </Text>
+        <Text style={styles.roomSubtitle}>{participants.length} participant(s)</Text>
       </View>
 
-      {/* Primary call stage: full-size tile + small floating preview */}
-      <View style={styles.videoStage}>
-        {isTwoParticipantLayout ? (
-          <>
-            {mainParticipant ? (
+      <View style={[styles.videoGrid, { height: stageHeight }]}>
+        {participants.length > 0 ? (
+          isTwoParticipantLayout && mainParticipant ? (
+            <View style={styles.videoStage}>
               <VideoTile
                 key={`main-${mainParticipant.identity}-${trackUpdate}`}
                 trackRef={getTrackRefForParticipant(mainParticipant.identity)}
                 participantName={mainParticipant.name || mainParticipant.identity}
                 participantId={mainParticipant.identity}
-                isSpeaking={mainParticipant.isSpeaking}
+                isSpeaking={!!mainParticipant.isSpeaking}
                 isLocal={mainParticipant.identity === localIdentity}
                 isPreview={false}
                 tileWidth={screenWidth}
                 tileHeight={stageHeight}
               />
-            ) : (
-              <View style={styles.noVideoContainer}>
-                <Text style={styles.noVideoText}>Waiting for participants...</Text>
-              </View>
-            )}
 
-            {previewParticipant && (
-              <TouchableOpacity
-                activeOpacity={0.92}
-                style={styles.previewTouchable}
-                onPress={handleSwapMainPreview}
-              >
+              {previewParticipant ? (
+                <TouchableOpacity
+                  style={[
+                    styles.previewTouchable,
+                    { width: previewWidth, height: previewHeight },
+                  ]}
+                  activeOpacity={0.9}
+                  onPress={handleSwapMainPreview}
+                >
+                  <VideoTile
+                    key={`preview-${previewParticipant.identity}-${trackUpdate}`}
+                    trackRef={getTrackRefForParticipant(previewParticipant.identity)}
+                    participantName={previewParticipant.name || previewParticipant.identity}
+                    participantId={previewParticipant.identity}
+                    isSpeaking={!!previewParticipant.isSpeaking}
+                    isLocal={previewParticipant.identity === localIdentity}
+                    isPreview={true}
+                    tileWidth={previewWidth}
+                    tileHeight={previewHeight}
+                  />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : (
+            <View style={styles.gridWrap}>
+              {participants.map(p => (
                 <VideoTile
-                  key={`preview-${previewParticipant.identity}-${trackUpdate}`}
-                  trackRef={getTrackRefForParticipant(previewParticipant.identity)}
-                  participantName={previewParticipant.name || previewParticipant.identity}
-                  participantId={previewParticipant.identity}
-                  isSpeaking={previewParticipant.isSpeaking}
-                  isLocal={previewParticipant.identity === localIdentity}
-                  isPreview={true}
-                  tileWidth={previewWidth}
-                  tileHeight={previewHeight}
+                  key={`grid-${p.identity}-${trackUpdate}`}
+                  trackRef={getTrackRefForParticipant(p.identity)}
+                  participantName={p.name || p.identity}
+                  participantId={p.identity}
+                  isSpeaking={!!p.isSpeaking}
+                  isLocal={p.identity === localIdentity}
+                  isPreview={false}
+                  tileWidth={Math.floor((screenWidth - 14) / 2)}
+                  tileHeight={Math.round(Math.floor((screenWidth - 14) / 2) * PREVIEW_RATIO)}
                 />
-              </TouchableOpacity>
-            )}
-          </>
-        ) : participants.length > 0 ? (
-          <View style={styles.gridWrap}>
-            {participants.map(p => (
-              <VideoTile
-                key={`grid-${p.identity}-${trackUpdate}`}
-                trackRef={getTrackRefForParticipant(p.identity)}
-                participantName={p.name || p.identity}
-                participantId={p.identity}
-                isSpeaking={p.isSpeaking}
-                isLocal={p.identity === localIdentity}
-                isPreview={false}
-                tileWidth={Math.floor((screenWidth - 14) / 2)}
-                tileHeight={Math.round(Math.floor((screenWidth - 14) / 2) * PREVIEW_RATIO)}
-              />
-            ))}
-          </View>
+              ))}
+            </View>
+          )
         ) : (
           <View style={styles.noVideoContainer}>
             <Text style={styles.noVideoText}>Waiting for participants...</Text>
@@ -633,7 +661,6 @@ const RoomContent: React.FC<RoomContentProps> = ({
         ))}
       </View>
 
-      {/* Controls Bar */}
       <ControlsBar
         isMicEnabled={isMicEnabled}
         isCameraEnabled={isCameraEnabled}
@@ -650,7 +677,6 @@ const RoomContent: React.FC<RoomContentProps> = ({
         participantCount={participants.length}
       />
 
-      {/* Participant List Modal */}
       <ParticipantList
         participants={participantInfoList}
         visible={showParticipants}
@@ -933,6 +959,8 @@ const styles = StyleSheet.create({
     right: 12,
     borderRadius: 8,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
     zIndex: 10,
   },
   reactionBurst: {

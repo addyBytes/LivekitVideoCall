@@ -88,14 +88,6 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
         </View>
       </View>
 
-      {isPreview && (
-        <View pointerEvents="none" style={styles.previewMaskLayer}>
-          <View style={[styles.previewMaskCorner, styles.previewMaskTopLeft]} />
-          <View style={[styles.previewMaskCorner, styles.previewMaskTopRight]} />
-          <View style={[styles.previewMaskCorner, styles.previewMaskBottomLeft]} />
-          <View style={[styles.previewMaskCorner, styles.previewMaskBottomRight]} />
-        </View>
-      )}
     </View>
   );
 };
@@ -114,6 +106,7 @@ const styles = StyleSheet.create({
     borderWidth: 0,
     margin: 0,
     borderRadius: 8,
+    overflow: 'hidden',
   },
   speaking: {
     borderColor: '#00d4aa',
@@ -201,35 +194,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: 'monospace',
     marginTop: 2,
-  },
-  previewMaskLayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  previewMaskCorner: {
-    position: 'absolute',
-    width: 8,
-    height: 8,
-    backgroundColor: '#0a0a1a',
-  },
-  previewMaskTopLeft: {
-    top: 0,
-    left: 0,
-    borderBottomRightRadius: 8,
-  },
-  previewMaskTopRight: {
-    top: 0,
-    right: 0,
-    borderBottomLeftRadius: 8,
-  },
-  previewMaskBottomLeft: {
-    bottom: 0,
-    left: 0,
-    borderTopRightRadius: 8,
-  },
-  previewMaskBottomRight: {
-    bottom: 0,
-    right: 0,
-    borderTopLeftRadius: 8,
   },
 });
 
