@@ -3,23 +3,50 @@
 // Bottom bar with mic, camera, leave, and participant toggle
 // ============================================================
 
-import React from 'react';
+import React, {useState} from 'react';
 import {View, Text, StyleSheet, TouchableOpacity} from 'react-native';
 import type {ControlsBarProps} from '../types';
+
+const REACTIONS = ['❤️', '😂', '👍', '🔥', '👏'];
 
 const ControlsBar: React.FC<ControlsBarProps> = ({
   isMicEnabled,
   isCameraEnabled,
   isFrontCamera,
+  isScreenSharing,
+  isSwitchCameraDisabled = false,
   onToggleMic,
   onToggleCamera,
   onSwitchCamera,
+  onToggleScreenShare,
+  onSendReaction,
   onLeaveRoom,
   onToggleParticipants,
   participantCount,
 }) => {
+  const [showReactions, setShowReactions] = useState(false);
+
+  const handleReactionPress = (emoji: string) => {
+    onSendReaction(emoji);
+    setShowReactions(false);
+  };
+
   return (
     <View style={styles.container}>
+      {showReactions && (
+        <View style={styles.reactionPanel}>
+          {REACTIONS.map(emoji => (
+            <TouchableOpacity
+              key={emoji}
+              style={styles.reactionButton}
+              onPress={() => handleReactionPress(emoji)}
+              activeOpacity={0.8}>
+              <Text style={styles.reactionEmoji}>{emoji}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
       {/* Mic Toggle */}
       <TouchableOpacity
         style={[styles.button, !isMicEnabled && styles.buttonDisabled]}
@@ -46,14 +73,37 @@ const ControlsBar: React.FC<ControlsBarProps> = ({
 
       {/* Camera Switch */}
       <TouchableOpacity
-        style={[styles.button, !isCameraEnabled && styles.buttonDisabled]}
+        style={[
+          styles.button,
+          (isSwitchCameraDisabled || !isCameraEnabled) && styles.buttonDisabled,
+        ]}
         onPress={onSwitchCamera}
         activeOpacity={0.7}
-        disabled={!isCameraEnabled}>
+        disabled={isSwitchCameraDisabled || !isCameraEnabled}>
         <Text style={styles.buttonIcon}>🔄</Text>
         <Text style={styles.buttonLabel}>
           {isFrontCamera ? 'Front' : 'Back'}
         </Text>
+      </TouchableOpacity>
+
+      {/* Screen Share */}
+      <TouchableOpacity
+        style={[styles.button, isScreenSharing && styles.shareActiveButton]}
+        onPress={onToggleScreenShare}
+        activeOpacity={0.7}>
+        <Text style={styles.buttonIcon}>{isScreenSharing ? '🛑' : '🖥️'}</Text>
+        <Text style={styles.buttonLabel}>
+          {isScreenSharing ? 'Stop Share' : 'Share'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Reactions */}
+      <TouchableOpacity
+        style={styles.button}
+        onPress={() => setShowReactions(prev => !prev)}
+        activeOpacity={0.7}>
+        <Text style={styles.buttonIcon}>😊</Text>
+        <Text style={styles.buttonLabel}>React</Text>
       </TouchableOpacity>
 
       {/* Participants Toggle */}
@@ -86,6 +136,7 @@ const ControlsBar: React.FC<ControlsBarProps> = ({
 
 const styles = StyleSheet.create({
   container: {
+    position: 'relative',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -96,14 +147,38 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(255, 255, 255, 0.08)',
     marginBottom: 40,
   },
+  reactionPanel: {
+    position: 'absolute',
+    bottom: 92,
+    left: 12,
+    flexDirection: 'row',
+    gap: 6,
+    backgroundColor: 'rgba(12, 12, 28, 0.95)',
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  reactionButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  reactionEmoji: {
+    fontSize: 20,
+  },
   button: {
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     borderRadius: 14,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    minWidth: 64,
+    minWidth: 58,
   },
   buttonDisabled: {
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
@@ -139,6 +214,9 @@ const styles = StyleSheet.create({
   },
   leaveButton: {
     backgroundColor: 'rgba(239, 68, 68, 0.9)',
+  },
+  shareActiveButton: {
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
   },
   leaveLabel: {
     color: '#ffffff',

@@ -15,6 +15,8 @@ import {
   Text,
   StyleSheet,
   ActivityIndicator,
+  Animated,
+  Easing,
   StatusBar,
   TouchableOpacity,
   useWindowDimensions,
@@ -44,6 +46,15 @@ import type {
 // ============================================================
 const PREVIEW_RATIO = 16 / 9;
 
+interface EmojiBurst {
+  id: number;
+  emoji: string;
+  x: number;
+  y: Animated.Value;
+  opacity: Animated.Value;
+  scale: Animated.Value;
+}
+
 // ============================================================
 // Room Content (rendered inside LiveKitRoom)
 // ============================================================
@@ -64,11 +75,14 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
   const [isLocalMain, setIsLocalMain] = useState(false);
   const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
   const mediaEnabledRef = useRef(false);
   const [trackUpdate, setTrackUpdate] = useState(0);
+  const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
+  const emojiBurstIdRef = useRef(0);
 
   // Explicitly enable camera and mic — only once on mount
   useEffect(() => {
@@ -149,9 +163,12 @@ const RoomContent: React.FC<RoomContentProps> = ({
     };
   }, [room]);
 
-  // Get all camera tracks (including placeholders for participants with camera off)
+  // Get camera + screen-share tracks
   const tracks = useTracks(
-    [{ source: Track.Source.Camera, withPlaceholder: true }],
+    [
+      { source: Track.Source.Camera, withPlaceholder: true },
+      { source: Track.Source.ScreenShare, withPlaceholder: false },
+    ],
     { onlySubscribed: false },
   );
 
@@ -185,6 +202,17 @@ const RoomContent: React.FC<RoomContentProps> = ({
     return localTrack;
   }, [tracks]);
 
+  const localScreenShareTrackRef = useMemo(() => {
+    const localTrack = tracks.find(
+      item =>
+        item.source === Track.Source.ScreenShare &&
+        item.participant.isLocal === true &&
+        isTrackReference(item) &&
+        item.publication?.track != null,
+    );
+    return localTrack;
+  }, [tracks]);
+
   const getRemoteCameraTrackRef = useCallback(
     (participantId: string) => {
       const remoteTrack = tracks.find(
@@ -199,6 +227,25 @@ const RoomContent: React.FC<RoomContentProps> = ({
     },
     [tracks],
   );
+
+  const getRemoteScreenShareTrackRef = useCallback(
+    (participantId: string) => {
+      const remoteTrack = tracks.find(
+        item =>
+          item.source === Track.Source.ScreenShare &&
+          item.participant.isLocal !== true &&
+          item.participant.identity === participantId &&
+          isTrackReference(item) &&
+          item.publication?.track != null,
+      );
+      return remoteTrack;
+    },
+    [tracks],
+  );
+
+  useEffect(() => {
+    setIsScreenSharing(!!localScreenShareTrackRef);
+  }, [localScreenShareTrackRef]);
 
   // Build participant info list
   const participantInfoList: ParticipantInfo[] = useMemo(() => {
@@ -249,14 +296,79 @@ const RoomContent: React.FC<RoomContentProps> = ({
     setIsLocalMain(prev => !prev);
   }, [selectedRemoteParticipant]);
 
+  const handleToggleScreenShare = useCallback(async () => {
+    try {
+      const nextSharing = !isScreenSharing;
+      await room.localParticipant.setScreenShareEnabled(nextSharing);
+      setIsScreenSharing(nextSharing);
+      console.log(`[ScreenShare] ${nextSharing ? 'Enabled' : 'Disabled'}`);
+    } catch (error) {
+      console.error('Failed to toggle screen sharing:', error);
+    }
+  }, [room, isScreenSharing]);
+
+  const handleSendReaction = useCallback(
+    (emoji: string) => {
+      const id = emojiBurstIdRef.current++;
+      const x = Math.max(
+        30,
+        Math.min(screenWidth - 180, screenWidth * (0.16 + Math.random() * 0.38)),
+      );
+
+      const burst: EmojiBurst = {
+        id,
+        emoji,
+        x,
+        y: new Animated.Value(0),
+        opacity: new Animated.Value(1),
+        scale: new Animated.Value(0.9),
+      };
+
+      setEmojiBursts(prev => [...prev, burst]);
+
+      Animated.parallel([
+        Animated.timing(burst.y, {
+          toValue: -180,
+          duration: 1200,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(burst.opacity, {
+          toValue: 0,
+          duration: 1200,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(burst.scale, {
+          toValue: 1.25,
+          duration: 1200,
+          easing: Easing.out(Easing.back(1.3)),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        setEmojiBursts(prev => prev.filter(item => item.id !== id));
+      });
+    },
+    [screenWidth],
+  );
+
   const getTrackRefForParticipant = useCallback(
     (participantIdentity: string) => {
       if (participantIdentity === localIdentity) {
-        return localCameraTrackRef;
+        return localScreenShareTrackRef ?? localCameraTrackRef;
       }
-      return getRemoteCameraTrackRef(participantIdentity);
+      return (
+        getRemoteScreenShareTrackRef(participantIdentity) ??
+        getRemoteCameraTrackRef(participantIdentity)
+      );
     },
-    [localIdentity, localCameraTrackRef, getRemoteCameraTrackRef],
+    [
+      localIdentity,
+      localScreenShareTrackRef,
+      localCameraTrackRef,
+      getRemoteScreenShareTrackRef,
+      getRemoteCameraTrackRef,
+    ],
   );
 
   // Toggle microphone
@@ -503,6 +615,22 @@ const RoomContent: React.FC<RoomContentProps> = ({
             <Text style={styles.noVideoText}>Waiting for participants...</Text>
           </View>
         )}
+
+        {emojiBursts.map(burst => (
+          <Animated.Text
+            key={burst.id}
+            style={[
+              styles.reactionBurst,
+              {
+                left: burst.x,
+                opacity: burst.opacity,
+                transform: [{ translateY: burst.y }, { scale: burst.scale }],
+              },
+            ]}
+          >
+            {burst.emoji}
+          </Animated.Text>
+        ))}
       </View>
 
       {/* Controls Bar */}
@@ -510,9 +638,13 @@ const RoomContent: React.FC<RoomContentProps> = ({
         isMicEnabled={isMicEnabled}
         isCameraEnabled={isCameraEnabled}
         isFrontCamera={isFrontCamera}
+        isScreenSharing={isScreenSharing}
+        isSwitchCameraDisabled={isScreenSharing}
         onToggleMic={handleToggleMic}
         onToggleCamera={handleToggleCamera}
         onSwitchCamera={handleSwitchCamera}
+        onToggleScreenShare={handleToggleScreenShare}
+        onSendReaction={handleSendReaction}
         onLeaveRoom={handleLeaveRoom}
         onToggleParticipants={() => setShowParticipants(!showParticipants)}
         participantCount={participants.length}
@@ -797,10 +929,17 @@ const styles = StyleSheet.create({
   },
   previewTouchable: {
     position: 'absolute',
-    top: 14,
-    right: 10,
-    borderRadius: 14,
+    bottom: 30,
+    right: 12,
+    borderRadius: 8,
+    overflow: 'hidden',
     zIndex: 10,
+  },
+  reactionBurst: {
+    position: 'absolute',
+    bottom: 120,
+    fontSize: 34,
+    zIndex: 30,
   },
   gridWrap: {
     flex: 1,

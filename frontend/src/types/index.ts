@@ -84,9 +84,13 @@ export interface ControlsBarProps {
   isMicEnabled: boolean;
   isCameraEnabled: boolean;
   isFrontCamera: boolean;
+  isScreenSharing: boolean;
+  isSwitchCameraDisabled?: boolean;
   onToggleMic: () => void;
   onToggleCamera: () => void;
   onSwitchCamera: () => void;
+  onToggleScreenShare: () => void;
+  onSendReaction: (emoji: string) => void;
   onLeaveRoom: () => void;
   onToggleParticipants: () => void;
   participantCount: number;
