@@ -58,6 +58,7 @@ export interface VideoTileProps {
   participantId: string;
   isSpeaking: boolean;
   isLocal: boolean;
+  isPreview?: boolean;
   tileWidth: number;
   tileHeight: number;
 }

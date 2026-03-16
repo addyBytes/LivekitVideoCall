@@ -15,10 +15,9 @@ import {
   Text,
   StyleSheet,
   ActivityIndicator,
-  Dimensions,
-  ScrollView,
   StatusBar,
   TouchableOpacity,
+  useWindowDimensions,
 } from 'react-native';
 import {
   LiveKitRoom,
@@ -43,71 +42,33 @@ import type {
 // ============================================================
 // Constants
 // ============================================================
-const TILES_PER_PAGE = 4;
-// 9:16 portrait ratio — height = width * (16/9)
-const PORTRAIT_RATIO = 16 / 9;
-
-// ============================================================
-// Tile size calculator — always 9:16 portrait ratio
-// ============================================================
-const getTileSizes = (screenWidth: number, screenHeight: number) => {
-  const availableWidth = screenWidth - 8; // 4px padding each side
-  const availableHeight = screenHeight - 160; // header + controls
-
-  // Two-column tile (used in 2×2 grid and 2-per-row layouts)
-  const twoColWidth = Math.floor(availableWidth / 2) - 4;
-  const twoColHeight = Math.round(twoColWidth * PORTRAIT_RATIO);
-
-  // Single / full-width tile — fit inside available area maintaining 9:16
-  const fullByHeight = Math.floor(availableHeight / PORTRAIT_RATIO);
-  const singleWidth = Math.min(availableWidth, fullByHeight);
-  const singleHeight = Math.round(singleWidth * PORTRAIT_RATIO);
-
-  return {
-    twoColWidth,
-    twoColHeight,
-    singleWidth,
-    singleHeight,
-    availableWidth,
-    availableHeight,
-  };
-};
+const PREVIEW_RATIO = 16 / 9;
 
 // ============================================================
 // Room Content (rendered inside LiveKitRoom)
 // ============================================================
 interface RoomContentProps {
   localParticipantId: string;
-  localParticipantName: string;
   roomName: string;
   onLeave: () => void;
 }
 
 const RoomContent: React.FC<RoomContentProps> = ({
   localParticipantId,
-  localParticipantName,
   roomName,
   onLeave,
 }) => {
   const room = useRoomContext();
   const participants = useParticipants();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [showParticipants, setShowParticipants] = useState(false);
-  const [dimensions, setDimensions] = useState(Dimensions.get('window'));
-  const [currentPage, setCurrentPage] = useState(0);
-  const pageScrollRef = useRef<ScrollView>(null);
+  const [isLocalMain, setIsLocalMain] = useState(false);
+  const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
   const mediaEnabledRef = useRef(false);
   const [trackUpdate, setTrackUpdate] = useState(0);
-
-  // Listen for dimension changes (rotation)
-  useEffect(() => {
-    const subscription = Dimensions.addEventListener('change', ({ window }) => {
-      setDimensions(window);
-    });
-    return () => subscription.remove();
-  }, []);
 
   // Explicitly enable camera and mic — only once on mount
   useEffect(() => {
@@ -188,23 +149,56 @@ const RoomContent: React.FC<RoomContentProps> = ({
     };
   }, [room]);
 
-  // Get all video tracks
+  // Get all camera tracks (including placeholders for participants with camera off)
   const tracks = useTracks(
-    [
-      { source: Track.Source.Camera, withPlaceholder: true },
-      { source: Track.Source.ScreenShare, withPlaceholder: false },
-    ],
+    [{ source: Track.Source.Camera, withPlaceholder: true }],
     { onlySubscribed: false },
   );
 
-  // Filter to video tracks only
-  const videoTracks = useMemo(() => {
-    return tracks.filter(
-      trackRef =>
-        trackRef.source === Track.Source.Camera ||
-        trackRef.source === Track.Source.ScreenShare,
+  const localIdentity = room.localParticipant?.identity || localParticipantId;
+
+  const remoteParticipants = useMemo(
+    () => Array.from(room.remoteParticipants.values()),
+    [room, trackUpdate],
+  );
+
+  useEffect(() => {
+    if (remoteParticipants.length === 0) {
+      setSelectedRemoteId(null);
+      return;
+    }
+
+    const exists = remoteParticipants.some(p => p.identity === selectedRemoteId);
+    if (!exists) {
+      setSelectedRemoteId(remoteParticipants[0].identity);
+    }
+  }, [remoteParticipants, selectedRemoteId]);
+
+  const localCameraTrackRef = useMemo(() => {
+    const localTrack = tracks.find(
+      item =>
+        item.source === Track.Source.Camera &&
+        item.participant.isLocal === true &&
+        isTrackReference(item) &&
+        item.publication?.track != null,
     );
+    return localTrack;
   }, [tracks]);
+
+  const getRemoteCameraTrackRef = useCallback(
+    (participantId: string) => {
+      const remoteTrack = tracks.find(
+        item =>
+          item.source === Track.Source.Camera &&
+          item.participant.isLocal !== true &&
+          item.participant.identity === participantId &&
+          isTrackReference(item) &&
+          item.publication?.track != null,
+      );
+      return remoteTrack;
+    },
+    [tracks],
+  );
 
   // Build participant info list
   const participantInfoList: ParticipantInfo[] = useMemo(() => {
@@ -224,35 +218,46 @@ const RoomContent: React.FC<RoomContentProps> = ({
     });
   }, [participants, roomName]);
 
-  // Tile sizes — always 9:16
-  const tileSizes = useMemo(
-    () => getTileSizes(dimensions.width, dimensions.height),
-    [dimensions],
+  const selectedRemoteParticipant = useMemo(() => {
+    return (
+      remoteParticipants.find(p => p.identity === selectedRemoteId) ??
+      remoteParticipants[0]
+    );
+  }, [remoteParticipants, selectedRemoteId]);
+
+  const localParticipant = room.localParticipant;
+
+  const isTwoParticipantLayout =
+    participants.length === 2 && remoteParticipants.length === 1;
+
+  const mainParticipant =
+    isLocalMain || !selectedRemoteParticipant
+      ? localParticipant
+      : selectedRemoteParticipant;
+
+  const previewParticipant =
+    mainParticipant?.identity === localIdentity
+      ? selectedRemoteParticipant
+      : localParticipant;
+
+  const stageHeight = Math.max(220, screenHeight - 220);
+  const previewWidth = Math.max(105, Math.min(140, Math.floor(screenWidth * 0.32)));
+  const previewHeight = Math.round(previewWidth * PREVIEW_RATIO);
+
+  const handleSwapMainPreview = useCallback(() => {
+    if (!selectedRemoteParticipant) return;
+    setIsLocalMain(prev => !prev);
+  }, [selectedRemoteParticipant]);
+
+  const getTrackRefForParticipant = useCallback(
+    (participantIdentity: string) => {
+      if (participantIdentity === localIdentity) {
+        return localCameraTrackRef;
+      }
+      return getRemoteCameraTrackRef(participantIdentity);
+    },
+    [localIdentity, localCameraTrackRef, getRemoteCameraTrackRef],
   );
-
-  // Split tracks into pages of 4
-  const pages = useMemo(() => {
-    if (videoTracks.length === 0) return [];
-    const result: (typeof videoTracks)[] = [];
-    for (let i = 0; i < videoTracks.length; i += TILES_PER_PAGE) {
-      result.push(videoTracks.slice(i, i + TILES_PER_PAGE));
-    }
-    return result;
-  }, [videoTracks]);
-
-  const totalPages = pages.length;
-
-  // Keep currentPage in bounds if participants leave
-  useEffect(() => {
-    if (currentPage >= totalPages && totalPages > 0) {
-      const newPage = totalPages - 1;
-      setCurrentPage(newPage);
-      pageScrollRef.current?.scrollTo({
-        x: newPage * dimensions.width,
-        animated: false,
-      });
-    }
-  }, [totalPages, currentPage, dimensions.width]);
 
   // Toggle microphone
   const handleToggleMic = useCallback(async () => {
@@ -422,114 +427,6 @@ const RoomContent: React.FC<RoomContentProps> = ({
     }
   }, [room, roomName, localParticipantId, onLeave]);
 
-  // Render a single video tile with correct size based on page slot count
-  const renderTile = useCallback(
-    (item: (typeof videoTracks)[0], slotCount: number) => {
-      const participant = item.participant;
-      const isLocal = participant.identity === localParticipantId;
-      const isSpeaking = participant.isSpeaking;
-      const useSingle = slotCount === 1;
-      const tileWidth = useSingle
-        ? tileSizes.singleWidth
-        : tileSizes.twoColWidth;
-      const tileHeight = useSingle
-        ? tileSizes.singleHeight
-        : tileSizes.twoColHeight;
-
-      // Only pass trackRef when the track is actually subscribed and has media data.
-      // isTrackReference() returns true for published-but-unsubscribed tracks (via
-      // isTrackReferencePublished), which causes VideoTrack to render with no media
-      // (black screen) instead of showing the avatar fallback.
-      const hasSubscribedTrack =
-        isTrackReference(item) && item.publication?.track != null;
-
-      return (
-        <VideoTile
-          key={`${participant.identity}-${item.source}`}
-          trackRef={hasSubscribedTrack ? item : undefined}
-          participantName={participant.name || participant.identity}
-          participantId={participant.identity}
-          isSpeaking={isSpeaking}
-          isLocal={isLocal}
-          tileWidth={tileWidth}
-          tileHeight={tileHeight}
-          trackUpdate={trackUpdate}
-        />
-      );
-    },
-    [localParticipantId, tileSizes, trackUpdate],
-  );
-
-  // Render one page (up to 4 tiles in a 2×2 grid)
-  const renderPage = useCallback(
-    (pageTracks: typeof videoTracks, pageIndex: number) => {
-      const count = pageTracks.length;
-
-      // 1 tile — centered
-      if (count === 1) {
-        return (
-          <View
-            key={pageIndex}
-            style={[styles.page, { width: dimensions.width }]}
-          >
-            <View style={styles.singleTileWrapper}>
-              {renderTile(pageTracks[0], 1)}
-            </View>
-          </View>
-        );
-      }
-
-      // 2 tiles — side by side
-      if (count === 2) {
-        return (
-          <View
-            key={pageIndex}
-            style={[styles.page, { width: dimensions.width }]}
-          >
-            <View style={styles.row}>
-              {renderTile(pageTracks[0], 2)}
-              {renderTile(pageTracks[1], 2)}
-            </View>
-          </View>
-        );
-      }
-
-      // 3 tiles — 2 on top, 1 centered below
-      if (count === 3) {
-        return (
-          <View
-            key={pageIndex}
-            style={[styles.page, { width: dimensions.width }]}
-          >
-            <View style={styles.row}>
-              {renderTile(pageTracks[0], 2)}
-              {renderTile(pageTracks[1], 2)}
-            </View>
-            <View style={styles.row}>{renderTile(pageTracks[2], 2)}</View>
-          </View>
-        );
-      }
-
-      // 4 tiles — 2×2 grid
-      return (
-        <View
-          key={pageIndex}
-          style={[styles.page, { width: dimensions.width }]}
-        >
-          <View style={styles.row}>
-            {renderTile(pageTracks[0], 2)}
-            {renderTile(pageTracks[1], 2)}
-          </View>
-          <View style={styles.row}>
-            {renderTile(pageTracks[2], 2)}
-            {renderTile(pageTracks[3], 2)}
-          </View>
-        </View>
-      );
-    },
-    [dimensions.width, renderTile],
-  );
-
   return (
     <View style={styles.roomContainer}>
       <StatusBar barStyle="light-content" backgroundColor="#0a0a1a" />
@@ -543,53 +440,70 @@ const RoomContent: React.FC<RoomContentProps> = ({
         </Text>
       </View>
 
-      {/* Paginated Video Grid */}
-      <View style={styles.videoGrid}>
-        {pages.length === 0 ? (
+      {/* Primary call stage: full-size tile + small floating preview */}
+      <View style={styles.videoStage}>
+        {isTwoParticipantLayout ? (
+          <>
+            {mainParticipant ? (
+              <VideoTile
+                key={`main-${mainParticipant.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(mainParticipant.identity)}
+                participantName={mainParticipant.name || mainParticipant.identity}
+                participantId={mainParticipant.identity}
+                isSpeaking={mainParticipant.isSpeaking}
+                isLocal={mainParticipant.identity === localIdentity}
+                isPreview={false}
+                tileWidth={screenWidth}
+                tileHeight={stageHeight}
+              />
+            ) : (
+              <View style={styles.noVideoContainer}>
+                <Text style={styles.noVideoText}>Waiting for participants...</Text>
+              </View>
+            )}
+
+            {previewParticipant && (
+              <TouchableOpacity
+                activeOpacity={0.92}
+                style={styles.previewTouchable}
+                onPress={handleSwapMainPreview}
+              >
+                <VideoTile
+                  key={`preview-${previewParticipant.identity}-${trackUpdate}`}
+                  trackRef={getTrackRefForParticipant(previewParticipant.identity)}
+                  participantName={previewParticipant.name || previewParticipant.identity}
+                  participantId={previewParticipant.identity}
+                  isSpeaking={previewParticipant.isSpeaking}
+                  isLocal={previewParticipant.identity === localIdentity}
+                  isPreview={true}
+                  tileWidth={previewWidth}
+                  tileHeight={previewHeight}
+                />
+              </TouchableOpacity>
+            )}
+          </>
+        ) : participants.length > 0 ? (
+          <View style={styles.gridWrap}>
+            {participants.map(p => (
+              <VideoTile
+                key={`grid-${p.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(p.identity)}
+                participantName={p.name || p.identity}
+                participantId={p.identity}
+                isSpeaking={p.isSpeaking}
+                isLocal={p.identity === localIdentity}
+                isPreview={false}
+                tileWidth={Math.floor((screenWidth - 14) / 2)}
+                tileHeight={Math.round(Math.floor((screenWidth - 14) / 2) * PREVIEW_RATIO)}
+              />
+            ))}
+          </View>
+        ) : (
           <View style={styles.noVideoContainer}>
             <Text style={styles.noVideoText}>Waiting for participants...</Text>
           </View>
-        ) : (
-          <ScrollView
-            ref={pageScrollRef}
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            scrollEventThrottle={16}
-            onMomentumScrollEnd={e => {
-              const newPage = Math.round(
-                e.nativeEvent.contentOffset.x / dimensions.width,
-              );
-              setCurrentPage(newPage);
-            }}
-            style={{ flex: 1 }}
-          >
-            {pages.map((pageTracks, idx) => renderPage(pageTracks, idx))}
-          </ScrollView>
         )}
       </View>
-
-      {/* Page Indicators */}
-      {totalPages > 1 && (
-        <View style={styles.pageIndicatorRow}>
-          {pages.map((_, idx) => (
-            <TouchableOpacity
-              key={idx}
-              style={[
-                styles.pageDot,
-                idx === currentPage && styles.pageDotActive,
-              ]}
-              onPress={() => {
-                setCurrentPage(idx);
-                pageScrollRef.current?.scrollTo({
-                  x: idx * dimensions.width,
-                  animated: true,
-                });
-              }}
-            />
-          ))}
-        </View>
-      )}
 
       {/* Controls Bar */}
       <ControlsBar
@@ -797,7 +711,6 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       >
         <RoomContent
           localParticipantId={participantId}
-          localParticipantName={participantName}
           roomName={roomName}
           onLeave={onLeave}
         />
@@ -875,7 +788,29 @@ const styles = StyleSheet.create({
   },
   videoGrid: {
     flex: 1,
-    padding: 4,
+    padding: 0,
+  },
+  videoStage: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewTouchable: {
+    position: 'absolute',
+    top: 14,
+    right: 10,
+    borderRadius: 14,
+    zIndex: 10,
+  },
+  gridWrap: {
+    flex: 1,
+    width: '100%',
+    paddingHorizontal: 4,
+    paddingTop: 4,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignContent: 'flex-start',
   },
   page: {
     flex: 1,

@@ -22,6 +22,7 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
   participantId,
   isSpeaking,
   isLocal,
+  isPreview = false,
   tileWidth,
   tileHeight,
 }) => {
@@ -33,6 +34,7 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
           width: tileWidth,
           height: tileHeight,
         },
+        isPreview && styles.previewContainer,
         isSpeaking && styles.speaking,
       ]}
     >
@@ -43,6 +45,7 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
           trackRef={trackRef}
           objectFit="cover"
           mirror={isLocal}
+          zOrder={isPreview ? 2 : 0}
         />
       ) : (
         <View style={styles.avatarContainer}>
@@ -97,6 +100,10 @@ const styles = StyleSheet.create({
     position: 'relative',
     borderWidth: 3,
     borderColor: 'transparent',
+  },
+  previewContainer: {
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.6)',
   },
   speaking: {
     borderColor: '#00d4aa',
