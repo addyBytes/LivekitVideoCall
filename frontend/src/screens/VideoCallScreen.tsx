@@ -19,6 +19,10 @@ import {
   Easing,
   StatusBar,
   TouchableOpacity,
+  AppState,
+  AppStateStatus,
+  NativeModules,
+  Platform,
   useWindowDimensions,
 } from 'react-native';
 import {
@@ -46,6 +50,13 @@ import type {
 // Constants
 // ============================================================
 const PREVIEW_RATIO = 16 / 9;
+const PipModule = NativeModules.PipModule as
+  | {
+      setInCallPipEnabled?: (enabled: boolean) => void;
+      enterPictureInPicture?: () => void;
+      supportsPip?: () => Promise<boolean>;
+    }
+  | undefined;
 
 interface EmojiBurst {
   id: number;
@@ -56,6 +67,10 @@ interface EmojiBurst {
   scale: Animated.Value;
 }
 
+interface PipModeChangeEvent {
+  isPip?: boolean;
+}
+
 // ============================================================
 // Room Content (rendered inside LiveKitRoom)
 // ============================================================
@@ -63,17 +78,24 @@ interface RoomContentProps {
   localParticipantId: string;
   roomName: string;
   onLeave: () => void;
+  overlay?: React.ReactNode;
 }
 
-const RoomContent: React.FC<RoomContentProps> = ({
+export const VideoRoomContent: React.FC<RoomContentProps> = ({
   localParticipantId,
   roomName,
   onLeave,
+  overlay,
 }) => {
   const room = useRoomContext();
   const participants = useParticipants();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [isMicEnabled, setIsMicEnabled] = useState(true);
+  const [isPip, setIsPip] = useState(false);
+  const pipRef = useRef(false);
+  const justExitedPipRef = useRef(false);
+  const [forceVideoOnly, setForceVideoOnly] = useState(false);
+  const forceVideoOnlyRef = useRef(false);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -85,6 +107,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
   const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
   const emojiBurstIdRef = useRef(0);
   const isTogglingScreenShareRef = useRef(false);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   const triggerEmojiBurst = useCallback(
     (emoji: string) => {
@@ -153,6 +176,60 @@ const RoomContent: React.FC<RoomContentProps> = ({
     };
     enableMedia();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !PipModule) return;
+
+    PipModule.setInCallPipEnabled?.(true);
+
+    // Listen for PiP mode changes from native
+    const emitter = require('react-native').NativeEventEmitter;
+    const pipEmitter = new emitter(NativeModules.PipModule);
+    const pipSub = pipEmitter.addListener('onPictureInPictureModeChanged', (event: PipModeChangeEvent) => {
+      if (event && typeof event.isPip === 'boolean') {
+        pipRef.current = event.isPip;
+        setIsPip(event.isPip);
+        if (event.isPip) {
+          setForceVideoOnly(true);
+          forceVideoOnlyRef.current = true;
+        } else {
+          // Restore UI immediately and synchronously
+          setForceVideoOnly(false);
+          forceVideoOnlyRef.current = false;
+          // Allow AppState handler to run after a short delay
+          justExitedPipRef.current = true;
+          setTimeout(() => {
+            justExitedPipRef.current = false;
+          }, 700);
+        }
+      }
+    });
+
+    // Enter PiP from JS on background, hiding UI first
+    const sub = AppState.addEventListener('change', nextState => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+      if (
+        prev === 'active' &&
+        (nextState === 'inactive' || nextState === 'background') &&
+        !pipRef.current &&
+        !forceVideoOnlyRef.current &&
+        !justExitedPipRef.current
+      ) {
+        setForceVideoOnly(true);
+        forceVideoOnlyRef.current = true;
+        setTimeout(() => {
+          PipModule.enterPictureInPicture?.();
+        }, 100);
+      }
+    });
+
+    return () => {
+      PipModule.setInCallPipEnabled?.(false);
+      pipSub.remove();
+      sub.remove();
+    };
   }, []);
 
   // Debug: Monitor room events for connectivity
@@ -348,7 +425,7 @@ const RoomContent: React.FC<RoomContentProps> = ({
       ? selectedRemoteParticipant
       : localParticipant;
 
-  const stageHeight = Math.max(220, screenHeight - 220);
+  const stageHeight = screenHeight;
   const previewWidth = Math.max(105, Math.min(140, Math.floor(screenWidth * 0.32)));
   const previewHeight = Math.round(previewWidth * PREVIEW_RATIO);
 
@@ -573,16 +650,45 @@ const RoomContent: React.FC<RoomContentProps> = ({
     }
   }, [room, roomName, localParticipantId, onLeave]);
 
+  if (isPip || forceVideoOnly) {
+    // Only show main video in PiP mode or when forceVideoOnly is set (no preview, no overlays, no ControlsBar)
+    return (
+      <View style={styles.roomContainer}>
+        <View style={[styles.videoGrid, { height: stageHeight }]}> 
+          {participants.length > 0 ? (
+            <View style={styles.videoStage}>
+              <VideoTile
+                key={`main-${mainParticipant.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(mainParticipant.identity)}
+                participantName={mainParticipant.name || mainParticipant.identity}
+                participantId={mainParticipant.identity}
+                isSpeaking={false}
+                isLocal={mainParticipant.identity === localIdentity}
+                isPreview={false}
+                tileWidth={screenWidth}
+                tileHeight={stageHeight}
+              />
+            </View>
+          ) : (
+            <View style={styles.noVideoContainer}>
+              <Text style={styles.noVideoText}>Waiting for participants...</Text>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  }
+
+  // Normal mode: show all controls
   return (
     <View style={styles.roomContainer}>
       <StatusBar barStyle="light-content" backgroundColor="#0a0a1a" />
-
+      {overlay}
       <View style={styles.roomHeader}>
         <Text style={styles.roomTitle}>{roomName}</Text>
         <Text style={styles.roomSubtitle}>{participants.length} participant(s)</Text>
       </View>
-
-      <View style={[styles.videoGrid, { height: stageHeight }]}>
+      <View style={[styles.videoGrid, { height: stageHeight }]}> 
         {participants.length > 0 ? (
           isTwoParticipantLayout && mainParticipant ? (
             <View style={styles.videoStage}>
@@ -597,7 +703,6 @@ const RoomContent: React.FC<RoomContentProps> = ({
                 tileWidth={screenWidth}
                 tileHeight={stageHeight}
               />
-
               {previewParticipant ? (
                 <TouchableOpacity
                   style={[
@@ -643,8 +748,8 @@ const RoomContent: React.FC<RoomContentProps> = ({
             <Text style={styles.noVideoText}>Waiting for participants...</Text>
           </View>
         )}
-
-        {emojiBursts.map(burst => (
+        {/* Only render emoji bursts if not in PiP mode */}
+        {!isPip && emojiBursts.map(burst => (
           <Animated.Text
             key={burst.id}
             style={[
@@ -660,28 +765,31 @@ const RoomContent: React.FC<RoomContentProps> = ({
           </Animated.Text>
         ))}
       </View>
-
-      <ControlsBar
-        isMicEnabled={isMicEnabled}
-        isCameraEnabled={isCameraEnabled}
-        isFrontCamera={isFrontCamera}
-        isScreenSharing={isScreenSharing}
-        isSwitchCameraDisabled={isScreenSharing}
-        onToggleMic={handleToggleMic}
-        onToggleCamera={handleToggleCamera}
-        onSwitchCamera={handleSwitchCamera}
-        onToggleScreenShare={handleToggleScreenShare}
-        onSendReaction={handleSendReaction}
-        onLeaveRoom={handleLeaveRoom}
-        onToggleParticipants={() => setShowParticipants(!showParticipants)}
-        participantCount={participants.length}
-      />
-
-      <ParticipantList
-        participants={participantInfoList}
-        visible={showParticipants}
-        onClose={() => setShowParticipants(false)}
-      />
+      {/* Only render ControlsBar and ParticipantList if not in PiP mode */}
+      {!isPip && (
+        <>
+          <ControlsBar
+            isMicEnabled={isMicEnabled}
+            isCameraEnabled={isCameraEnabled}
+            isFrontCamera={isFrontCamera}
+            isScreenSharing={isScreenSharing}
+            isSwitchCameraDisabled={isScreenSharing}
+            onToggleMic={handleToggleMic}
+            onToggleCamera={handleToggleCamera}
+            onSwitchCamera={handleSwitchCamera}
+            onToggleScreenShare={handleToggleScreenShare}
+            onSendReaction={handleSendReaction}
+            onLeaveRoom={handleLeaveRoom}
+            onToggleParticipants={() => setShowParticipants(!showParticipants)}
+            participantCount={participants.length}
+          />
+          <ParticipantList
+            participants={participantInfoList}
+            visible={showParticipants}
+            onClose={() => setShowParticipants(false)}
+          />
+        </>
+      )}
     </View>
   );
 };
@@ -867,7 +975,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         onDisconnected={handleDisconnected}
         onError={handleError}
       >
-        <RoomContent
+        <VideoRoomContent
           localParticipantId={participantId}
           roomName={roomName}
           onLeave={onLeave}
@@ -928,8 +1036,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a1a',
   },
   roomHeader: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 2, // reduce vertical padding to minimize top space
     backgroundColor: '#0f0f23',
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255, 255, 255, 0.06)',
@@ -947,6 +1055,7 @@ const styles = StyleSheet.create({
   videoGrid: {
     flex: 1,
     padding: 0,
+    marginTop: 0, // ensure no extra margin
   },
   videoStage: {
     flex: 1,
@@ -955,9 +1064,9 @@ const styles = StyleSheet.create({
   },
   previewTouchable: {
     position: 'absolute',
-    bottom: 30,
-    right: 12,
-    borderRadius: 8,
+    bottom: 95, // lift it above the button bar
+    right: 16,
+    borderRadius: 16, // curve all sides more
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.14)',

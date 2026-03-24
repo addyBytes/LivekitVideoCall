@@ -4,6 +4,27 @@
 // ============================================================
 
 import React, {useState} from 'react';
+import { Platform, NativeModules } from 'react-native';
+
+interface PipModeChangeEvent {
+  isPip?: boolean;
+}
+
+// PiP mode detection helper (must match VideoCallScreen)
+function usePipMode() {
+  const [isPip, setIsPip] = useState(false);
+  React.useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const handler = (event: PipModeChangeEvent) => {
+      if (event && typeof event.isPip === 'boolean') setIsPip(event.isPip);
+    };
+    const emitter = require('react-native').NativeEventEmitter;
+    const pipEmitter = new emitter(NativeModules.PipModule);
+    const sub = pipEmitter.addListener('onPictureInPictureModeChanged', handler);
+    return () => sub.remove();
+  }, []);
+  return isPip;
+}
 import {View, Text, StyleSheet, TouchableOpacity} from 'react-native';
 import type {ControlsBarProps} from '../types';
 
@@ -25,6 +46,9 @@ const ControlsBar: React.FC<ControlsBarProps> = ({
   participantCount,
 }) => {
   const [showReactions, setShowReactions] = useState(false);
+  const isPipMode = usePipMode();
+
+  if (isPipMode) return null;
 
   const handleReactionPress = (emoji: string) => {
     onSendReaction(emoji);
@@ -32,144 +56,177 @@ const ControlsBar: React.FC<ControlsBarProps> = ({
   };
 
   return (
-    <View style={styles.container}>
-      {showReactions && (
-        <View style={styles.reactionPanel}>
-          {REACTIONS.map(emoji => (
-            <TouchableOpacity
-              key={emoji}
-              style={styles.reactionButton}
-              onPress={() => handleReactionPress(emoji)}
-              activeOpacity={0.8}>
-              <Text style={styles.reactionEmoji}>{emoji}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      {/* Mic Toggle */}
-      <TouchableOpacity
-        style={[styles.button, !isMicEnabled && styles.buttonDisabled]}
-        onPress={onToggleMic}
-        activeOpacity={0.7}>
-        <Text style={styles.buttonIcon}>{isMicEnabled ? '🎙️' : '🔇'}</Text>
-        <Text style={styles.buttonLabel}>
-          {isMicEnabled ? 'Mute' : 'Unmute'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* Camera Toggle */}
-      <TouchableOpacity
-        style={[styles.button, !isCameraEnabled && styles.buttonDisabled]}
-        onPress={onToggleCamera}
-        activeOpacity={0.7}>
-        <Text style={styles.buttonIcon}>
-          {isCameraEnabled ? '📹' : '📷'}
-        </Text>
-        <Text style={styles.buttonLabel}>
-          {isCameraEnabled ? 'Cam Off' : 'Cam On'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* Camera Switch */}
-      <TouchableOpacity
-        style={[
-          styles.button,
-          (isSwitchCameraDisabled || !isCameraEnabled) && styles.buttonDisabled,
-        ]}
-        onPress={onSwitchCamera}
-        activeOpacity={0.7}
-        disabled={isSwitchCameraDisabled || !isCameraEnabled}>
-        <Text style={styles.buttonIcon}>🔄</Text>
-        <Text style={styles.buttonLabel}>
-          {isFrontCamera ? 'Front' : 'Back'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* Screen Share */}
-      <TouchableOpacity
-        style={[styles.button, isScreenSharing && styles.shareActiveButton]}
-        onPress={onToggleScreenShare}
-        activeOpacity={0.7}>
-        <Text style={styles.buttonIcon}>{isScreenSharing ? '🛑' : '🖥️'}</Text>
-        <Text style={styles.buttonLabel}>
-          {isScreenSharing ? 'Stop Share' : 'Share'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* Reactions */}
-      <TouchableOpacity
-        style={styles.button}
-        onPress={() => setShowReactions(prev => !prev)}
-        activeOpacity={0.7}>
-        <Text style={styles.buttonIcon}>😊</Text>
-        <Text style={styles.buttonLabel}>React</Text>
-      </TouchableOpacity>
-
-      {/* Participants Toggle */}
-      <TouchableOpacity
-        style={styles.button}
-        onPress={onToggleParticipants}
-        activeOpacity={0.7}>
-        <View style={styles.participantIconContainer}>
-          <Text style={styles.buttonIcon}>👥</Text>
-          {participantCount > 0 && (
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>{participantCount}</Text>
+    <>
+      {/* Top right floating small controls */}
+      <View style={styles.topRightContainer} pointerEvents="box-none">
+        <View style={styles.floatingControls}>
+          <TouchableOpacity
+            style={styles.floatingButton}
+            onPress={() => setShowReactions(prev => !prev)}
+            activeOpacity={0.7}>
+            <Text style={styles.floatingIcon}>😊</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.floatingButton}
+            onPress={onToggleScreenShare}
+            activeOpacity={0.7}>
+            <Text style={styles.floatingIcon}>{isScreenSharing ? '🛑' : '🖥️'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.floatingButton}
+            onPress={onToggleParticipants}
+            activeOpacity={0.7}>
+            <View style={styles.participantIconContainer}>
+              <Text style={styles.floatingIcon}>👥</Text>
+              {participantCount > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{participantCount}</Text>
+                </View>
+              )}
             </View>
-          )}
+          </TouchableOpacity>
         </View>
-        <Text style={styles.buttonLabel}>People</Text>
-      </TouchableOpacity>
+        {/* Reactions panel (if open) */}
+        {showReactions && (
+          <View style={styles.reactionPanelFloating}>
+            {REACTIONS.map(emoji => (
+              <TouchableOpacity
+                key={emoji}
+                style={styles.reactionButton}
+                onPress={() => handleReactionPress(emoji)}
+                activeOpacity={0.8}>
+                <Text style={styles.reactionEmoji}>{emoji}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+      </View>
 
-      {/* Leave Room */}
-      <TouchableOpacity
-        style={[styles.button, styles.leaveButton]}
-        onPress={onLeaveRoom}
-        activeOpacity={0.7}>
-        <Text style={styles.buttonIcon}>📞</Text>
-        <Text style={[styles.buttonLabel, styles.leaveLabel]}>Leave</Text>
-      </TouchableOpacity>
-    </View>
+      {/* Bottom bar main controls */}
+      <View style={styles.container}>
+        <View style={styles.row}>
+          <TouchableOpacity
+            style={[styles.button, !isMicEnabled && styles.buttonDisabled]}
+            onPress={onToggleMic}
+            activeOpacity={0.7}>
+            <Text style={styles.buttonIcon}>{isMicEnabled ? '🎙️' : '🔇'}</Text>
+            <Text style={styles.buttonLabel}>
+              {isMicEnabled ? 'Mute' : 'Unmute'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, !isCameraEnabled && styles.buttonDisabled]}
+            onPress={onToggleCamera}
+            activeOpacity={0.7}>
+            <Text style={styles.buttonIcon}>{isCameraEnabled ? '📹' : '📷'}</Text>
+            <Text style={styles.buttonLabel}>
+              {isCameraEnabled ? 'Cam Off' : 'Cam On'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.button,
+              (isSwitchCameraDisabled || !isCameraEnabled) && styles.buttonDisabled,
+            ]}
+            onPress={onSwitchCamera}
+            activeOpacity={0.7}
+            disabled={isSwitchCameraDisabled || !isCameraEnabled}>
+            <Text style={styles.buttonIcon}>🔄</Text>
+            <Text style={styles.buttonLabel}>{isFrontCamera ? 'Front' : 'Back'}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.leaveButton]}
+            onPress={onLeaveRoom}
+            activeOpacity={0.7}>
+            <Text style={styles.buttonIcon}>📞</Text>
+            <Text style={[styles.buttonLabel, styles.leaveLabel]}>Leave</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </>
   );
 };
 
 const styles = StyleSheet.create({
+  // Bottom bar
   container: {
-    position: 'relative',
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#0f0f23',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+    marginBottom: 0,
+    zIndex: 10,
+  },
+  row: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#0f0f23',
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.08)',
-    marginBottom: 40,
+    gap: 8,
   },
-  reactionPanel: {
+  // Top right floating controls
+  topRightContainer: {
     position: 'absolute',
-    bottom: 92,
-    left: 12,
-    flexDirection: 'row',
-    gap: 6,
-    backgroundColor: 'rgba(12, 12, 28, 0.95)',
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    top: 18,
+    right: 16,
+    zIndex: 20,
+    alignItems: 'flex-end',
+    pointerEvents: 'box-none',
   },
-  reactionButton: {
+  floatingControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(12, 12, 28, 0.92)',
+    borderRadius: 16,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    marginBottom: 2,
+  },
+  floatingButton: {
     width: 34,
     height: 34,
     borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    marginHorizontal: 2,
+  },
+  floatingIcon: {
+    fontSize: 18,
+    color: '#fff',
+  },
+  reactionPanelFloating: {
+    flexDirection: 'row',
+    gap: 6,
+    backgroundColor: 'rgba(12, 12, 28, 0.97)',
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    marginTop: 6,
+    alignSelf: 'flex-end',
+  },
+  reactionButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
   },
   reactionEmoji: {
-    fontSize: 20,
+    fontSize: 18,
   },
   button: {
     alignItems: 'center',
@@ -178,7 +235,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     borderRadius: 14,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    minWidth: 58,
+    minWidth: 68,
+    flex: 1,
   },
   buttonDisabled: {
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
@@ -213,6 +271,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   leaveButton: {
+    flex: 1,
     backgroundColor: 'rgba(239, 68, 68, 0.9)',
   },
   shareActiveButton: {

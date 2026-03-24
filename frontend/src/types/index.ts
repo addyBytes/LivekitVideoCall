@@ -49,6 +49,17 @@ export interface VideoCallScreenProps {
   onLeave: () => void;
 }
 
+export interface MeetingScreenProps extends VideoCallScreenProps {
+  isHost: boolean;
+  mode: 'create' | 'join';
+}
+
+export interface MeetingWaitingParticipant {
+  requestId: string;
+  participantName: string;
+  createdAt: string;
+}
+
 /**
  * Props for the VideoTile component
  */

@@ -4,6 +4,27 @@
 // ============================================================
 
 import React from 'react';
+import { Platform, NativeModules } from 'react-native';
+
+interface PipModeChangeEvent {
+  isPip?: boolean;
+}
+
+// PiP mode detection helper (must match VideoCallScreen)
+function usePipMode() {
+  const [isPip, setIsPip] = React.useState(false);
+  React.useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const handler = (event: PipModeChangeEvent) => {
+      if (event && typeof event.isPip === 'boolean') setIsPip(event.isPip);
+    };
+    const emitter = require('react-native').NativeEventEmitter;
+    const pipEmitter = new emitter(NativeModules.PipModule);
+    const sub = pipEmitter.addListener('onPictureInPictureModeChanged', handler);
+    return () => sub.remove();
+  }, []);
+  return isPip;
+}
 import { View, Text, StyleSheet } from 'react-native';
 import { VideoTrack } from '@livekit/react-native';
 import type { VideoTileProps } from '../types';
@@ -26,6 +47,7 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
   tileWidth,
   tileHeight,
 }) => {
+  const isPipMode = usePipMode();
   return (
     <View
       style={[
@@ -62,32 +84,33 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
       )}
 
       {/* Overlay: Participant Info */}
-      <View style={styles.overlay}>
-        {/* Speaking Indicator */}
-        {isSpeaking && (
-          <View style={styles.speakingBadge}>
-            <Text style={styles.speakingText}>🔊</Text>
-          </View>
-        )}
+      {!isPipMode && (
+        <View style={styles.overlay}>
+          {/* Speaking Indicator */}
+          {isSpeaking && (
+            <View style={styles.speakingBadge}>
+              <Text style={styles.speakingText}>🔊</Text>
+            </View>
+          )}
 
-        {/* Local Badge */}
-        {isLocal && (
-          <View style={styles.localBadge}>
-            <Text style={styles.localText}>You</Text>
-          </View>
-        )}
+          {/* Local Badge */}
+          {isLocal && (
+            <View style={styles.localBadge}>
+              <Text style={styles.localText}>You</Text>
+            </View>
+          )}
 
-        {/* Bottom Info Bar */}
-        <View style={styles.infoBar}>
-          <Text style={styles.nameText} numberOfLines={1}>
-            {participantName}
-          </Text>
-          <Text style={styles.uuidText} numberOfLines={1}>
-            {participantId.substring(0, 8)}...
-          </Text>
+          {/* Bottom Info Bar */}
+          <View style={styles.infoBar}>
+            <Text style={styles.nameText} numberOfLines={1}>
+              {participantName}
+            </Text>
+            <Text style={styles.uuidText} numberOfLines={1}>
+              {participantId.substring(0, 8)}...
+            </Text>
+          </View>
         </View>
-      </View>
-
+      )}
     </View>
   );
 };
