@@ -668,6 +668,25 @@ app.post("/meetings/leave", async (req, res) => {
 });
 
 // ============================================================
+// GET /room-participants — list active participant IDs for one room
+// ============================================================
+app.get("/room-participants", (req, res) => {
+  const { roomName } = req.query;
+
+  if (!roomName) {
+    return res.status(400).json({
+      error: "Missing required field: roomName",
+    });
+  }
+
+  const room = rooms.get(roomName);
+
+  return res.json({
+    participantIds: room ? Array.from(room.keys()) : [],
+  });
+});
+
+// ============================================================
 // GET /rooms — list active rooms (debug endpoint)
 // ============================================================
 app.get("/rooms", (req, res) => {

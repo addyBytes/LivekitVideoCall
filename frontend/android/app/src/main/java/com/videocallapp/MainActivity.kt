@@ -1,8 +1,7 @@
 package com.videocallapp
 
-import android.app.PictureInPictureParams
+import android.content.res.Configuration
 import android.os.Build
-import android.util.Rational
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -33,5 +32,20 @@ class MainActivity : ReactActivity() {
     //     .build()
     //   enterPictureInPictureMode(params)
     // }
+  }
+
+  override fun onPictureInPictureModeChanged(
+    isInPictureInPictureMode: Boolean,
+    newConfig: Configuration,
+  ) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    PipModule.emitPipModeChanged(isInPictureInPictureMode)
+  }
+
+  override fun onResume() {
+    super.onResume()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isInPictureInPictureMode) {
+      PipModule.emitPipModeChanged(false)
+    }
   }
 }

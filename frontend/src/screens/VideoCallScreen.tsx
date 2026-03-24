@@ -55,6 +55,7 @@ import type {
 // Constants
 // ============================================================
 const PREVIEW_RATIO = 16 / 9;
+const ROOM_PARTICIPANTS_POLL_INTERVAL = 2000;
 const PipModule = NativeModules.PipModule as
   | {
       setInCallPipEnabled?: (enabled: boolean) => void;
@@ -102,6 +103,9 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const [isRoomConnected, setIsRoomConnected] = useState(
     room.state === LiveKitConnectionState.Connected,
   );
+  const [activeRoomParticipantIds, setActiveRoomParticipantIds] = useState<
+    string[] | null
+  >(null);
   const pipRef = useRef(false);
   const justExitedPipRef = useRef(false);
   const [forceVideoOnly, setForceVideoOnly] = useState(false);
@@ -118,15 +122,57 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
   const emojiBurstIdRef = useRef(0);
   const isTogglingScreenShareRef = useRef(false);
+  const suppressAutoPipUntilRef = useRef(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   const visibleParticipants = useMemo(
     () =>
       participants.filter(
-        participant => !hiddenParticipantIds.includes(participant.identity),
+        participant =>
+          !hiddenParticipantIds.includes(participant.identity) &&
+          (activeRoomParticipantIds == null ||
+            activeRoomParticipantIds.includes(participant.identity)),
       ),
-    [hiddenParticipantIds, participants],
+    [activeRoomParticipantIds, hiddenParticipantIds, participants],
   );
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadActiveRoomParticipants = async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/room-participants?roomName=${encodeURIComponent(
+            roomName,
+          )}`,
+        );
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data: { participantIds?: string[] } = await response.json();
+        if (mounted) {
+          setActiveRoomParticipantIds(data.participantIds || []);
+        }
+      } catch (error) {
+        if (mounted) {
+          setActiveRoomParticipantIds(null);
+        }
+      }
+    };
+
+    loadActiveRoomParticipants();
+    const interval = setInterval(
+      loadActiveRoomParticipants,
+      ROOM_PARTICIPANTS_POLL_INTERVAL,
+    );
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [roomName]);
 
   const triggerEmojiBurst = useCallback(
     (emoji: string) => {
@@ -228,12 +274,19 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     const sub = AppState.addEventListener('change', nextState => {
       const prev = appStateRef.current;
       appStateRef.current = nextState;
+      if (nextState === 'active' && !pipRef.current) {
+        setForceVideoOnly(false);
+        forceVideoOnlyRef.current = false;
+      }
+
       if (
         prev === 'active' &&
         (nextState === 'inactive' || nextState === 'background') &&
         !pipRef.current &&
         !forceVideoOnlyRef.current &&
-        !justExitedPipRef.current
+        !justExitedPipRef.current &&
+        !isTogglingScreenShareRef.current &&
+        Date.now() > suppressAutoPipUntilRef.current
       ) {
         setForceVideoOnly(true);
         forceVideoOnlyRef.current = true;
@@ -513,6 +566,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const handleToggleScreenShare = useCallback(async () => {
     if (isTogglingScreenShareRef.current) return;
     isTogglingScreenShareRef.current = true;
+    suppressAutoPipUntilRef.current = Date.now() + 5000;
     try {
       const nextSharing = !isScreenSharing;
       await room.localParticipant.setScreenShareEnabled(nextSharing);

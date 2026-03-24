@@ -48,6 +48,12 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
   tileHeight,
 }) => {
   const isPipMode = usePipMode();
+  const hasActiveVideo =
+    !!trackRef &&
+    !!trackRef.publication &&
+    trackRef.publication.isMuted !== true &&
+    trackRef.publication.track != null;
+
   return (
     <View
       style={[
@@ -61,7 +67,7 @@ const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
       ]}
     >
       {/* Video View or Avatar Fallback */}
-      {trackRef ? (
+      {hasActiveVideo ? (
         <VideoTrack
           style={styles.videoView}
           trackRef={trackRef}

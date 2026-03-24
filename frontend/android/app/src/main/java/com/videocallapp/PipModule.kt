@@ -3,16 +3,37 @@ package com.videocallapp
 import android.app.PictureInPictureParams
 import android.os.Build
 import android.util.Rational
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 class PipModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
   companion object {
     @JvmField
     var isInCallPipEnabled: Boolean = false
+
+    private var reactContextRef: ReactApplicationContext? = null
+
+    fun emitPipModeChanged(isInPip: Boolean) {
+      val reactContext = reactContextRef ?: return
+      if (!reactContext.hasActiveReactInstance()) return
+
+      val payload = Arguments.createMap().apply {
+        putBoolean("isPip", isInPip)
+      }
+
+      reactContext
+        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+        .emit("onPictureInPictureModeChanged", payload)
+    }
+  }
+
+  init {
+    reactContextRef = reactContext
   }
 
   override fun getName(): String = "PipModule"
