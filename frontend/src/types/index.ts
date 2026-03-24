@@ -27,6 +27,8 @@ export interface ParticipantInfo {
   name: string;
   joinedAt: string;
   isLocal: boolean;
+  canPin?: boolean;
+  isPinned?: boolean;
 }
 
 /**
@@ -81,6 +83,7 @@ export interface ParticipantListProps {
   participants: ParticipantInfo[];
   visible: boolean;
   onClose: () => void;
+  onPinParticipant?: (participantId: string) => void;
 }
 
 /**

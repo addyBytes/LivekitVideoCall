@@ -33,7 +33,12 @@ import {
   AudioSession,
   isTrackReference,
 } from '@livekit/react-native';
-import { Track, Room, RoomEvent } from 'livekit-client';
+import {
+  Track,
+  Room,
+  RoomEvent,
+  ConnectionState as LiveKitConnectionState,
+} from 'livekit-client';
 import { Buffer } from 'buffer';
 import { API_BASE_URL } from '../config/api';
 import VideoTile from '../components/VideoTile';
@@ -79,6 +84,7 @@ interface RoomContentProps {
   roomName: string;
   onLeave: () => void;
   overlay?: React.ReactNode;
+  hiddenParticipantIds?: string[];
 }
 
 export const VideoRoomContent: React.FC<RoomContentProps> = ({
@@ -86,12 +92,16 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   roomName,
   onLeave,
   overlay,
+  hiddenParticipantIds = [],
 }) => {
   const room = useRoomContext();
   const participants = useParticipants();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isPip, setIsPip] = useState(false);
+  const [isRoomConnected, setIsRoomConnected] = useState(
+    room.state === LiveKitConnectionState.Connected,
+  );
   const pipRef = useRef(false);
   const justExitedPipRef = useRef(false);
   const [forceVideoOnly, setForceVideoOnly] = useState(false);
@@ -102,12 +112,21 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const [showParticipants, setShowParticipants] = useState(false);
   const [isLocalMain, setIsLocalMain] = useState(false);
   const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
+  const [pinnedParticipantId, setPinnedParticipantId] = useState<string | null>(null);
   const mediaEnabledRef = useRef(false);
   const [trackUpdate, setTrackUpdate] = useState(0);
   const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
   const emojiBurstIdRef = useRef(0);
   const isTogglingScreenShareRef = useRef(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+
+  const visibleParticipants = useMemo(
+    () =>
+      participants.filter(
+        participant => !hiddenParticipantIds.includes(participant.identity),
+      ),
+    [hiddenParticipantIds, participants],
+  );
 
   const triggerEmojiBurst = useCallback(
     (emoji: string) => {
@@ -156,7 +175,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
 
   // Explicitly enable camera and mic — only once on mount
   useEffect(() => {
-    if (mediaEnabledRef.current) return;
+    if (!isRoomConnected || mediaEnabledRef.current) return;
     mediaEnabledRef.current = true;
     const enableMedia = async () => {
       try {
@@ -175,8 +194,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       }
     };
     enableMedia();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isRoomConnected, room]);
 
   useEffect(() => {
     if (Platform.OS !== 'android' || !PipModule) return;
@@ -236,6 +254,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   useEffect(() => {
     const onStateChange = (state: string) => {
       console.log(`[Room] Connection state changed: ${state}`);
+      setIsRoomConnected(state === LiveKitConnectionState.Connected);
     };
     const onParticipantConnected = (p: any) => {
       console.log(`[Room] Remote participant connected: ${p.name || p.identity}`);
@@ -313,8 +332,11 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const localIdentity = room.localParticipant?.identity || localParticipantId;
 
   const remoteParticipants = useMemo(
-    () => Array.from(room.remoteParticipants.values()),
-    [room, trackUpdate],
+    () =>
+      Array.from(room.remoteParticipants.values()).filter(
+        participant => !hiddenParticipantIds.includes(participant.identity),
+      ),
+    [hiddenParticipantIds, room, trackUpdate],
   );
 
   useEffect(() => {
@@ -328,6 +350,20 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       setSelectedRemoteId(remoteParticipants[0].identity);
     }
   }, [remoteParticipants, selectedRemoteId]);
+
+  useEffect(() => {
+    if (!pinnedParticipantId) {
+      return;
+    }
+
+    const pinnedStillExists = visibleParticipants.some(
+      participant => participant.identity === pinnedParticipantId,
+    );
+
+    if (!pinnedStillExists) {
+      setPinnedParticipantId(null);
+    }
+  }, [visibleParticipants, pinnedParticipantId]);
 
   const localCameraTrackRef = useMemo(() => {
     const localTrack = tracks.find(
@@ -387,21 +423,23 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
 
   // Build participant info list
   const participantInfoList: ParticipantInfo[] = useMemo(() => {
-    return participants.map(p => ({
+    return visibleParticipants.map(p => ({
       id: p.identity,
       name: p.name || p.identity,
       joinedAt: new Date().toISOString(),
       isLocal: p.identity === localParticipantId,
+      canPin: p.identity !== localParticipantId,
+      isPinned: p.identity === pinnedParticipantId,
     }));
-  }, [participants, localParticipantId]);
+  }, [visibleParticipants, localParticipantId, pinnedParticipantId]);
 
   // Console log participant changes
   useEffect(() => {
-    console.log(`\n[Room: ${roomName}] Participants: ${participants.length}`);
-    participants.forEach(p => {
+    console.log(`\n[Room: ${roomName}] Participants: ${visibleParticipants.length}`);
+    visibleParticipants.forEach(p => {
       console.log(`  - ${p.name || p.identity} (${p.identity})`);
     });
-  }, [participants, roomName]);
+  }, [visibleParticipants, roomName]);
 
   const selectedRemoteParticipant = useMemo(() => {
     return (
@@ -410,24 +448,62 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     );
   }, [remoteParticipants, selectedRemoteId]);
 
+  const pinnedParticipant = useMemo(
+    () =>
+      pinnedParticipantId
+        ? visibleParticipants.find(
+            participant => participant.identity === pinnedParticipantId,
+          ) ?? null
+          : null,
+    [pinnedParticipantId, visibleParticipants],
+  );
+
   const localParticipant = room.localParticipant;
 
+  const isPinnedMode = !!pinnedParticipant;
+  const isSingleParticipantLayout = visibleParticipants.length === 1;
+
   const isTwoParticipantLayout =
-    participants.length === 2 && remoteParticipants.length === 1;
+    visibleParticipants.length === 2 && remoteParticipants.length === 1;
 
   const mainParticipant =
-    isLocalMain || !selectedRemoteParticipant
+    pinnedParticipant ??
+    (isLocalMain || !selectedRemoteParticipant
       ? localParticipant
-      : selectedRemoteParticipant;
+      : selectedRemoteParticipant);
 
   const previewParticipant =
-    mainParticipant?.identity === localIdentity
+    isPinnedMode
+      ? null
+      : mainParticipant?.identity === localIdentity
       ? selectedRemoteParticipant
       : localParticipant;
 
   const stageHeight = screenHeight;
   const previewWidth = Math.max(105, Math.min(140, Math.floor(screenWidth * 0.32)));
   const previewHeight = Math.round(previewWidth * PREVIEW_RATIO);
+  const gridColumnCount = visibleParticipants.length >= 2 ? 2 : 1;
+  const gridRowCount = Math.max(
+    1,
+    Math.ceil(visibleParticipants.length / gridColumnCount),
+  );
+  const gridGap = 8;
+  const gridHorizontalPadding = 12;
+  const gridVerticalPadding = 12;
+  const controlsReservedHeight = 120;
+  const availableGridWidth =
+    screenWidth -
+    gridHorizontalPadding * 2 -
+    gridGap * (gridColumnCount - 1);
+  const availableGridHeight = Math.max(
+    220,
+    stageHeight -
+      controlsReservedHeight -
+      gridVerticalPadding * 2 -
+      gridGap * (gridRowCount - 1),
+  );
+  const gridTileWidth = Math.floor(availableGridWidth / gridColumnCount);
+  const gridTileHeight = Math.floor(availableGridHeight / gridRowCount);
 
   const handleSwapMainPreview = useCallback(() => {
     if (!selectedRemoteParticipant) return;
@@ -450,11 +526,11 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   }, [room, isScreenSharing]);
 
   const handleSendReaction = useCallback(
-    (emoji: string) => {
+    async (emoji: string) => {
       try {
         const msg = JSON.stringify({ type: 'emoji', emoji });
         const bytes = Uint8Array.from(Buffer.from(msg, 'utf8'));
-        room.localParticipant.publishData(bytes, { reliable: true });
+        await room.localParticipant.publishData(bytes, { reliable: true });
       } catch (err) {
         console.warn('Failed to send emoji reaction:', err);
       }
@@ -462,6 +538,15 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     },
     [room, triggerEmojiBurst],
   );
+
+  const handlePinParticipant = useCallback((participantIdentity: string) => {
+    setPinnedParticipantId(participantIdentity);
+    setShowParticipants(false);
+  }, []);
+
+  const handleUnpinParticipant = useCallback(() => {
+    setPinnedParticipantId(null);
+  }, []);
 
   const getTrackRefForParticipant = useCallback(
     (participantIdentity: string) => {
@@ -655,7 +740,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     return (
       <View style={styles.roomContainer}>
         <View style={[styles.videoGrid, { height: stageHeight }]}> 
-          {participants.length > 0 ? (
+          {visibleParticipants.length > 0 ? (
             <View style={styles.videoStage}>
               <VideoTile
                 key={`main-${mainParticipant.identity}-${trackUpdate}`}
@@ -686,11 +771,53 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       {overlay}
       <View style={styles.roomHeader}>
         <Text style={styles.roomTitle}>{roomName}</Text>
-        <Text style={styles.roomSubtitle}>{participants.length} participant(s)</Text>
+        <Text style={styles.roomSubtitle}>{visibleParticipants.length} participant(s)</Text>
       </View>
+      {pinnedParticipant ? (
+        <View style={styles.pinnedBanner}>
+          <Text style={styles.pinnedBannerText}>
+            Pinned: {pinnedParticipant.name || pinnedParticipant.identity}
+          </Text>
+          <TouchableOpacity
+            style={styles.unpinButton}
+            onPress={handleUnpinParticipant}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.unpinButtonText}>Unpin</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
       <View style={[styles.videoGrid, { height: stageHeight }]}> 
-        {participants.length > 0 ? (
-          isTwoParticipantLayout && mainParticipant ? (
+        {visibleParticipants.length > 0 ? (
+          isPinnedMode && mainParticipant ? (
+            <View style={styles.videoStage}>
+              <VideoTile
+                key={`pinned-${mainParticipant.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(mainParticipant.identity)}
+                participantName={mainParticipant.name || mainParticipant.identity}
+                participantId={mainParticipant.identity}
+                isSpeaking={!!mainParticipant.isSpeaking}
+                isLocal={mainParticipant.identity === localIdentity}
+                isPreview={false}
+                tileWidth={screenWidth}
+                tileHeight={stageHeight}
+              />
+            </View>
+          ) : isSingleParticipantLayout && mainParticipant ? (
+            <View style={styles.videoStage}>
+              <VideoTile
+                key={`solo-${mainParticipant.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(mainParticipant.identity)}
+                participantName={mainParticipant.name || mainParticipant.identity}
+                participantId={mainParticipant.identity}
+                isSpeaking={!!mainParticipant.isSpeaking}
+                isLocal={mainParticipant.identity === localIdentity}
+                isPreview={false}
+                tileWidth={screenWidth}
+                tileHeight={stageHeight}
+              />
+            </View>
+          ) : isTwoParticipantLayout && mainParticipant ? (
             <View style={styles.videoStage}>
               <VideoTile
                 key={`main-${mainParticipant.identity}-${trackUpdate}`}
@@ -728,7 +855,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
             </View>
           ) : (
             <View style={styles.gridWrap}>
-              {participants.map(p => (
+              {visibleParticipants.map(p => (
                 <VideoTile
                   key={`grid-${p.identity}-${trackUpdate}`}
                   trackRef={getTrackRefForParticipant(p.identity)}
@@ -737,8 +864,8 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
                   isSpeaking={!!p.isSpeaking}
                   isLocal={p.identity === localIdentity}
                   isPreview={false}
-                  tileWidth={Math.floor((screenWidth - 14) / 2)}
-                  tileHeight={Math.round(Math.floor((screenWidth - 14) / 2) * PREVIEW_RATIO)}
+                  tileWidth={gridTileWidth}
+                  tileHeight={gridTileHeight}
                 />
               ))}
             </View>
@@ -781,12 +908,13 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
             onSendReaction={handleSendReaction}
             onLeaveRoom={handleLeaveRoom}
             onToggleParticipants={() => setShowParticipants(!showParticipants)}
-            participantCount={participants.length}
+            participantCount={visibleParticipants.length}
           />
           <ParticipantList
             participants={participantInfoList}
             visible={showParticipants}
             onClose={() => setShowParticipants(false)}
+            onPinParticipant={handlePinParticipant}
           />
         </>
       )}
@@ -904,7 +1032,9 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     configureAudio();
 
     return () => {
-      AudioSession.stopAudioSession();
+      void AudioSession.stopAudioSession().catch(error => {
+        console.warn('Failed to stop audio session:', error);
+      });
     };
   }, []);
 
@@ -969,8 +1099,8 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         connectOptions={{
           autoSubscribe: true,
         }}
-        audio={true}
-        video={true}
+        audio={false}
+        video={false}
         onConnected={handleConnected}
         onDisconnected={handleDisconnected}
         onError={handleError}
@@ -1078,11 +1208,42 @@ const styles = StyleSheet.create({
     fontSize: 34,
     zIndex: 30,
   },
+  pinnedBanner: {
+    position: 'absolute',
+    top: 44,
+    alignSelf: 'center',
+    zIndex: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(12, 12, 28, 0.94)',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 10,
+  },
+  pinnedBannerText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  unpinButton: {
+    backgroundColor: '#ef4444',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  unpinButtonText: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   gridWrap: {
     flex: 1,
     width: '100%',
-    paddingHorizontal: 4,
-    paddingTop: 4,
+    paddingHorizontal: 8,
+    paddingTop: 8,
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',

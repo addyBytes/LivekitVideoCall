@@ -127,11 +127,15 @@ const MeetingStatusWatcher: React.FC<MeetingStatusWatcherProps> = ({
 interface MeetingHostControlsProps {
   roomName: string;
   hostParticipantId: string;
+  hiddenParticipantIds: string[];
+  onParticipantKicked: (participantId: string) => void;
 }
 
 const MeetingHostControls: React.FC<MeetingHostControlsProps> = ({
   roomName,
   hostParticipantId,
+  hiddenParticipantIds,
+  onParticipantKicked,
 }) => {
   const participants = useParticipants();
   const [showManagementModal, setShowManagementModal] = useState(false);
@@ -215,7 +219,7 @@ const MeetingHostControls: React.FC<MeetingHostControlsProps> = ({
     async (participantId: string) => {
       setActiveActionId(participantId);
       try {
-        await fetch(`${API_BASE_URL}/meetings/kick`, {
+        const response = await fetch(`${API_BASE_URL}/meetings/kick`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -224,23 +228,30 @@ const MeetingHostControls: React.FC<MeetingHostControlsProps> = ({
             participantId,
           }),
         });
+        if (response.ok) {
+          onParticipantKicked(participantId);
+        }
       } catch (error) {
         console.warn('[Meeting] Failed to kick participant:', error);
       } finally {
         setActiveActionId(null);
       }
     },
-    [hostParticipantId, roomName],
+    [hostParticipantId, onParticipantKicked, roomName],
   );
 
   const activeParticipants = useMemo(
     () =>
-      participants.map(participant => ({
-        id: participant.identity,
-        name: participant.name || participant.identity,
-        isHost: participant.identity === hostParticipantId,
-      })),
-    [hostParticipantId, participants],
+      participants
+        .filter(
+          participant => !hiddenParticipantIds.includes(participant.identity),
+        )
+        .map(participant => ({
+          id: participant.identity,
+          name: participant.name || participant.identity,
+          isHost: participant.identity === hostParticipantId,
+        })),
+    [hiddenParticipantIds, hostParticipantId, participants],
   );
 
   return (
@@ -362,6 +373,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
   const [audioReady, setAudioReady] = useState(false);
   const [waitingRequestId, setWaitingRequestId] = useState<string | null>(null);
   const [waitingForAdmission, setWaitingForAdmission] = useState(!isHost);
+  const [hiddenParticipantIds, setHiddenParticipantIds] = useState<string[]>([]);
   const leavingRef = useRef(false);
 
   const leaveMeetingState = useCallback(
@@ -374,6 +386,19 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
 
       try {
         if (participantId) {
+          try {
+            await fetch(`${API_BASE_URL}/leave-room`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                roomName,
+                participantId,
+              }),
+            });
+          } catch (leaveRoomError) {
+            console.warn('[Meeting] Failed to notify room leave:', leaveRoomError);
+          }
+
           await fetch(`${API_BASE_URL}/meetings/leave`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -435,7 +460,9 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
     configureAudio();
 
     return () => {
-      AudioSession.stopAudioSession();
+      void AudioSession.stopAudioSession().catch(error => {
+        console.warn('[Meeting] Failed to stop audio session:', error);
+      });
     };
   }, []);
 
@@ -611,8 +638,8 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
       connectOptions={{
         autoSubscribe: true,
       }}
-      audio={true}
-      video={true}
+      audio={false}
+      video={false}
       onConnected={() => setConnectionState('connected')}
       onDisconnected={() => setConnectionState('disconnected')}
       onError={error => {
@@ -633,6 +660,14 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
         <MeetingHostControls
           roomName={roomName}
           hostParticipantId={participantId}
+          hiddenParticipantIds={hiddenParticipantIds}
+          onParticipantKicked={kickedParticipantId => {
+            setHiddenParticipantIds(currentIds =>
+              currentIds.includes(kickedParticipantId)
+                ? currentIds
+                : [...currentIds, kickedParticipantId],
+            );
+          }}
         />
       ) : null}
 
@@ -640,6 +675,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
         localParticipantId={participantId}
         roomName={roomName}
         onLeave={leaveMeetingState}
+        hiddenParticipantIds={hiddenParticipantIds}
       />
     </LiveKitRoom>
   );

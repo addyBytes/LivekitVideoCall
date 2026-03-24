@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const { AccessToken } = require("livekit-server-sdk");
+const { AccessToken, RoomServiceClient } = require("livekit-server-sdk");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
@@ -15,6 +15,10 @@ const LIVEKIT_API_SECRET =
   process.env.LIVEKIT_API_SECRET || 'kR1cbkqfjxekQSHW486Nol4VxleeQ3UfUzufnveUw1bM' ;
 const LIVEKIT_URL =
   process.env.LIVEKIT_URL || "wss://vc-iflnvq5g.livekit.cloud";
+const LIVEKIT_HTTP_URL = LIVEKIT_URL.replace(/^wss:/, "https:").replace(
+  /^ws:/,
+  "http:",
+);
 
 // ============================================================
 // In-memory room tracking
@@ -22,6 +26,11 @@ const LIVEKIT_URL =
 const rooms = new Map();
 // rooms structure: Map<roomName, Map<participantId, { name, uuid, joinedAt }>>
 const meetings = new Map();
+const roomService = new RoomServiceClient(
+  LIVEKIT_HTTP_URL,
+  LIVEKIT_API_KEY,
+  LIVEKIT_API_SECRET,
+);
 
 app.use(cors());
 app.use(express.json());
@@ -95,6 +104,48 @@ const getMeeting = roomName => meetings.get(roomName);
 const isMeetingHost = (meeting, participantId) =>
   !!meeting && meeting.hostParticipantId === participantId;
 
+const cleanupMeetingIfRoomEmpty = roomName => {
+  const room = rooms.get(roomName);
+  if (!room || room.size === 0) {
+    meetings.delete(roomName);
+  }
+};
+
+const isLiveKitRoomNotFoundError = error => {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("not found") ||
+    message.includes("room does not exist") ||
+    message.includes("participant does not exist")
+  );
+};
+
+const removeLiveKitParticipant = async (roomName, participantId) => {
+  try {
+    await roomService.removeParticipant(roomName, participantId);
+  } catch (error) {
+    if (!isLiveKitRoomNotFoundError(error)) {
+      console.warn(
+        `[LiveKit] Failed to remove participant ${participantId} from ${roomName}:`,
+        error?.message || error,
+      );
+    }
+  }
+};
+
+const deleteLiveKitRoom = async roomName => {
+  try {
+    await roomService.deleteRoom(roomName);
+  } catch (error) {
+    if (!isLiveKitRoomNotFoundError(error)) {
+      console.warn(
+        `[LiveKit] Failed to delete room ${roomName}:`,
+        error?.message || error,
+      );
+    }
+  }
+};
+
 // ============================================================
 // POST /create-token
 // ============================================================
@@ -140,7 +191,7 @@ app.post("/create-token", async (req, res) => {
 // ============================================================
 // POST /leave-room — optional cleanup endpoint
 // ============================================================
-app.post("/leave-room", (req, res) => {
+app.post("/leave-room", async (req, res) => {
   try {
     const { roomName, participantId } = req.body;
 
@@ -152,6 +203,12 @@ app.post("/leave-room", (req, res) => {
 
     const participant = removeParticipantFromRoom(roomName, participantId);
     const room = rooms.get(roomName);
+
+    cleanupMeetingIfRoomEmpty(roomName);
+
+    if (!room) {
+      await deleteLiveKitRoom(roomName);
+    }
 
     if (participant) {
       console.log("\n========================");
@@ -190,10 +247,16 @@ app.post("/meetings/create", async (req, res) => {
     }
 
     const existingMeeting = getMeeting(roomName);
+    const existingRoom = rooms.get(roomName);
     if (existingMeeting && !existingMeeting.ended) {
+      if (!existingRoom || existingRoom.size === 0) {
+        meetings.delete(roomName);
+        await deleteLiveKitRoom(roomName);
+      } else {
       return res.status(409).json({
         error: "A meeting for this room already exists",
       });
+      }
     }
 
     const access = await createParticipantAccess(roomName, participantName);
@@ -461,7 +524,7 @@ app.post("/meetings/remove-waiting", (req, res) => {
 // POST /meetings/kick
 // Host removes an active participant from the meeting
 // ============================================================
-app.post("/meetings/kick", (req, res) => {
+app.post("/meetings/kick", async (req, res) => {
   try {
     const { roomName, hostParticipantId, participantId } = req.body;
     const meeting = getMeeting(roomName);
@@ -486,6 +549,8 @@ app.post("/meetings/kick", (req, res) => {
 
     meeting.participantStatuses.set(participantId, "kicked");
     removeParticipantFromRoom(roomName, participantId);
+    await removeLiveKitParticipant(roomName, participantId);
+    cleanupMeetingIfRoomEmpty(roomName);
 
     return res.json({ success: true });
   } catch (error) {
@@ -575,7 +640,7 @@ app.post("/meetings/cancel-request", (req, res) => {
 // POST /meetings/leave
 // Cleanup meeting-specific state when a participant leaves
 // ============================================================
-app.post("/meetings/leave", (req, res) => {
+app.post("/meetings/leave", async (req, res) => {
   try {
     const { roomName, participantId } = req.body;
     const meeting = getMeeting(roomName);
@@ -585,14 +650,11 @@ app.post("/meetings/leave", (req, res) => {
     }
 
     if (participantId === meeting.hostParticipantId) {
-      meeting.ended = true;
-      meeting.participantStatuses.forEach((_, activeParticipantId) => {
-        if (activeParticipantId !== participantId) {
-          meeting.participantStatuses.set(activeParticipantId, "ended");
-        }
-      });
+      meetings.delete(roomName);
+      await deleteLiveKitRoom(roomName);
     } else {
       meeting.participantStatuses.delete(participantId);
+      cleanupMeetingIfRoomEmpty(roomName);
     }
 
     return res.json({ success: true });

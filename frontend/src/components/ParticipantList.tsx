@@ -19,6 +19,7 @@ const ParticipantList: React.FC<ParticipantListProps> = ({
   participants,
   visible,
   onClose,
+  onPinParticipant,
 }) => {
   const renderParticipant = ({item}: {item: ParticipantInfo}) => (
     <View style={styles.participantRow}>
@@ -46,6 +47,22 @@ const ParticipantList: React.FC<ParticipantListProps> = ({
           Joined: {new Date(item.joinedAt).toLocaleTimeString()}
         </Text>
       </View>
+
+      {item.canPin ? (
+        <TouchableOpacity
+          style={[
+            styles.pinButton,
+            item.isPinned && styles.pinButtonActive,
+          ]}
+          onPress={() => {
+            onPinParticipant?.(item.id);
+            onClose();
+          }}>
+          <Text style={styles.pinButtonText}>
+            {item.isPinned ? 'Pinned' : 'Pin'}
+          </Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 
@@ -160,6 +177,24 @@ const styles = StyleSheet.create({
   },
   participantInfo: {
     flex: 1,
+  },
+  pinButton: {
+    backgroundColor: 'rgba(99, 102, 241, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(165, 180, 252, 0.3)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginLeft: 12,
+  },
+  pinButtonActive: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+  },
+  pinButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   nameRow: {
     flexDirection: 'row',

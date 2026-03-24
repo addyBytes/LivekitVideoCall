@@ -376,7 +376,9 @@ const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
     configureAudio();
 
     return () => {
-      AudioSession.stopAudioSession();
+      void AudioSession.stopAudioSession().catch(error => {
+        console.warn('[Audio] Failed to stop audio session:', error);
+      });
     };
   }, []);
 

@@ -208,7 +208,7 @@ const App: React.FC = () => {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.header}>
-          <Text style={styles.logoIcon}>Video</Text>
+          <Text style={styles.logoIcon}>Infidhi</Text>
           <Text style={styles.title}>Video Call</Text>
           <Text style={styles.subtitle}>Powered by LiveKit</Text>
         </View>
