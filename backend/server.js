@@ -1,5 +1,9 @@
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+const { spawn } = require("child_process");
 const { AccessToken, RoomServiceClient } = require("livekit-server-sdk");
 const { v4: uuidv4 } = require("uuid");
 
@@ -19,6 +23,24 @@ const LIVEKIT_HTTP_URL = LIVEKIT_URL.replace(/^wss:/, "https:").replace(
   /^ws:/,
   "http:",
 );
+const TRANSCRIPTION_INPUT_SAMPLE_RATE =
+  Number(process.env.TRANSCRIPTION_INPUT_SAMPLE_RATE) ||
+  Number(process.env.TRANSCRIPTION_SAMPLE_RATE) ||
+  48000;
+const TRANSCRIPTION_OUTPUT_SAMPLE_RATE =
+  Number(process.env.TRANSCRIPTION_OUTPUT_SAMPLE_RATE) || 16000;
+const TRANSCRIPTION_DEFAULT_BITS_PER_SAMPLE = 16;
+const TRANSCRIPTION_DEFAULT_CHANNELS = 1;
+const TRANSCRIPTION_MODEL_PATH =
+  process.env.VOSK_MODEL_PATH ||
+  path.join(__dirname, "models", "vosk-model");
+const TRANSCRIPTION_SESSION_TTL_MS = 10 * 60 * 1000;
+const TRANSCRIPTION_PYTHON_BIN =
+  process.env.TRANSCRIPTION_PYTHON_BIN || "python";
+const TRANSCRIPTION_WORKER_PATH = path.join(
+  __dirname,
+  "transcription_worker.py",
+);
 
 // ============================================================
 // In-memory room tracking
@@ -31,9 +53,14 @@ const roomService = new RoomServiceClient(
   LIVEKIT_API_KEY,
   LIVEKIT_API_SECRET,
 );
+const transcriptionSessions = new Map();
+const transcriptionPendingRequests = new Map();
+let transcriptionWorker = null;
+let transcriptionWorkerReadline = null;
+let transcriptionWorkerRequestCounter = 0;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 app.get("/", (req, res) => {
   res.json({
@@ -104,10 +131,21 @@ const getMeeting = roomName => meetings.get(roomName);
 const isMeetingHost = (meeting, participantId) =>
   !!meeting && meeting.hostParticipantId === participantId;
 
+const destroyTranscriptionSessionsForRoom = roomName => {
+  const prefix = `${roomName}:`;
+
+  Array.from(transcriptionSessions.keys()).forEach(sessionKey => {
+    if (sessionKey.startsWith(prefix)) {
+      destroyTranscriptionSession(sessionKey);
+    }
+  });
+};
+
 const cleanupMeetingIfRoomEmpty = roomName => {
   const room = rooms.get(roomName);
   if (!room || room.size === 0) {
     meetings.delete(roomName);
+    destroyTranscriptionSessionsForRoom(roomName);
   }
 };
 
@@ -145,6 +183,360 @@ const deleteLiveKitRoom = async roomName => {
     }
   }
 };
+
+const getTranscriptionSessionKey = (roomName, participantId) =>
+  `${roomName}:${participantId}`;
+
+const clearTranscriptionSession = sessionKey => {
+  const session = transcriptionSessions.get(sessionKey);
+  if (!session) {
+    return null;
+  }
+
+  transcriptionSessions.delete(sessionKey);
+  return session;
+};
+
+const rejectPendingTranscriptionRequests = message => {
+  transcriptionPendingRequests.forEach(({ reject, timeout }) => {
+    clearTimeout(timeout);
+    reject(new Error(message));
+  });
+  transcriptionPendingRequests.clear();
+};
+
+const cleanupTranscriptionWorker = message => {
+  if (transcriptionWorkerReadline) {
+    transcriptionWorkerReadline.removeAllListeners();
+    transcriptionWorkerReadline.close();
+    transcriptionWorkerReadline = null;
+  }
+
+  transcriptionWorker = null;
+  rejectPendingTranscriptionRequests(
+    message || "Python transcription worker is not running.",
+  );
+};
+
+const ensureTranscriptionWorker = () => {
+  if (transcriptionWorker && !transcriptionWorker.killed) {
+    return transcriptionWorker;
+  }
+
+  if (!fs.existsSync(TRANSCRIPTION_WORKER_PATH)) {
+    throw new Error(
+      `Python transcription worker was not found at ${TRANSCRIPTION_WORKER_PATH}`,
+    );
+  }
+
+  transcriptionWorker = spawn(
+    TRANSCRIPTION_PYTHON_BIN,
+    ["-u", TRANSCRIPTION_WORKER_PATH],
+    {
+      cwd: __dirname,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  transcriptionWorker.stdout.setEncoding("utf8");
+  transcriptionWorker.stderr.setEncoding("utf8");
+
+  transcriptionWorkerReadline = readline.createInterface({
+    input: transcriptionWorker.stdout,
+  });
+
+  transcriptionWorkerReadline.on("line", line => {
+    if (!line.trim()) {
+      return;
+    }
+
+    try {
+      const message = JSON.parse(line);
+      const pending = transcriptionPendingRequests.get(message.id);
+
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(pending.timeout);
+      transcriptionPendingRequests.delete(message.id);
+
+      if (message.success === false) {
+        pending.reject(new Error(message.error || "Transcription worker error"));
+        return;
+      }
+
+      pending.resolve(message);
+    } catch (error) {
+      console.warn(
+        "[Transcription] Failed to parse worker response:",
+        line,
+        error?.message || error,
+      );
+    }
+  });
+
+  transcriptionWorker.stderr.on("data", chunk => {
+    const message = chunk.toString().trim();
+    if (message) {
+      console.warn("[TranscriptionWorker]", message);
+    }
+  });
+
+  transcriptionWorker.on("error", error => {
+    cleanupTranscriptionWorker(
+      error?.message || "Python transcription worker failed to start.",
+    );
+  });
+
+  transcriptionWorker.on("exit", code => {
+    cleanupTranscriptionWorker(
+      `Python transcription worker exited with code ${code ?? "unknown"}.`,
+    );
+  });
+
+  return transcriptionWorker;
+};
+
+const sendTranscriptionWorkerRequest = (action, payload = {}) =>
+  new Promise((resolve, reject) => {
+    let worker;
+
+    try {
+      worker = ensureTranscriptionWorker();
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    if (!worker.stdin || worker.stdin.destroyed || !worker.stdin.writable) {
+      reject(new Error("Python transcription worker is not writable."));
+      return;
+    }
+
+    const id = `tx-${Date.now()}-${transcriptionWorkerRequestCounter += 1}`;
+    const timeout = setTimeout(() => {
+      transcriptionPendingRequests.delete(id);
+      reject(new Error("Python transcription worker request timed out."));
+    }, 30000);
+
+    transcriptionPendingRequests.set(id, {
+      resolve,
+      reject,
+      timeout,
+    });
+
+    worker.stdin.write(
+      `${JSON.stringify({
+        id,
+        action,
+        ...payload,
+      })}\n`,
+      error => {
+        if (!error) {
+          return;
+        }
+
+        clearTimeout(timeout);
+        transcriptionPendingRequests.delete(id);
+        reject(error);
+      },
+    );
+  });
+
+const getTranscriptionAvailability = async () => {
+  if (!fs.existsSync(TRANSCRIPTION_MODEL_PATH)) {
+    return {
+      available: false,
+      reason: `Offline transcription model was not found at ${TRANSCRIPTION_MODEL_PATH}`,
+    };
+  }
+
+  try {
+    const response = await sendTranscriptionWorkerRequest("status", {
+      modelPath: TRANSCRIPTION_MODEL_PATH,
+      outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+    });
+
+    return {
+      available: !!response.available,
+      reason: response.reason || null,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : "Python transcription worker is unavailable.",
+    };
+  }
+};
+
+const destroyTranscriptionSession = sessionKey => {
+  const session = clearTranscriptionSession(sessionKey);
+  if (!session) {
+    return null;
+  }
+
+  sendTranscriptionWorkerRequest("stop", { sessionId: sessionKey }).catch(error => {
+    console.warn(
+      "[Transcription] Failed to stop Python transcription session:",
+      error?.message || error,
+    );
+  });
+
+  return session;
+};
+
+const ensureTranscriptionSession = async (roomName, participantId) => {
+  const sessionKey = getTranscriptionSessionKey(roomName, participantId);
+
+  clearTranscriptionSession(sessionKey);
+  await sendTranscriptionWorkerRequest("start", {
+    sessionId: sessionKey,
+    modelPath: TRANSCRIPTION_MODEL_PATH,
+    outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+  });
+
+  transcriptionSessions.set(sessionKey, {
+    roomName,
+    participantId,
+    updatedAt: Date.now(),
+  });
+
+  return sessionKey;
+};
+
+const clampInt16 = value => {
+  if (value > 32767) {
+    return 32767;
+  }
+  if (value < -32768) {
+    return -32768;
+  }
+  return Math.round(value);
+};
+
+const decodePcmBuffer = (audioBuffer, bitsPerSample) => {
+  if (bitsPerSample === 16) {
+    const sampleCount = Math.floor(audioBuffer.length / 2);
+    const samples = new Int16Array(sampleCount);
+
+    for (let index = 0; index < sampleCount; index += 1) {
+      samples[index] = audioBuffer.readInt16LE(index * 2);
+    }
+
+    return samples;
+  }
+
+  if (bitsPerSample === 32) {
+    const sampleCount = Math.floor(audioBuffer.length / 4);
+    const samples = new Int16Array(sampleCount);
+
+    for (let index = 0; index < sampleCount; index += 1) {
+      samples[index] = clampInt16(audioBuffer.readFloatLE(index * 4) * 32767);
+    }
+
+    return samples;
+  }
+
+  throw new Error(
+    `Unsupported transcription audio format: ${bitsPerSample}-bit PCM`,
+  );
+};
+
+const downmixToMono = (samples, numberOfChannels) => {
+  if (!numberOfChannels || numberOfChannels <= 1) {
+    return samples;
+  }
+
+  const frameCount = Math.floor(samples.length / numberOfChannels);
+  const monoSamples = new Int16Array(frameCount);
+
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    let sum = 0;
+
+    for (let channelIndex = 0; channelIndex < numberOfChannels; channelIndex += 1) {
+      sum += samples[frameIndex * numberOfChannels + channelIndex];
+    }
+
+    monoSamples[frameIndex] = clampInt16(sum / numberOfChannels);
+  }
+
+  return monoSamples;
+};
+
+const resamplePcm16 = (samples, inputSampleRate, outputSampleRate) => {
+  if (inputSampleRate === outputSampleRate) {
+    return samples;
+  }
+
+  const outputLength = Math.max(
+    1,
+    Math.round(samples.length * (outputSampleRate / inputSampleRate)),
+  );
+  const outputSamples = new Int16Array(outputLength);
+
+  for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
+    const position = outputIndex * (inputSampleRate / outputSampleRate);
+    const leftIndex = Math.floor(position);
+    const rightIndex = Math.min(leftIndex + 1, samples.length - 1);
+    const interpolation = position - leftIndex;
+    const leftSample = samples[leftIndex] || 0;
+    const rightSample = samples[rightIndex] || leftSample;
+
+    outputSamples[outputIndex] = clampInt16(
+      leftSample + (rightSample - leftSample) * interpolation,
+    );
+  }
+
+  return outputSamples;
+};
+
+const pcm16ToBuffer = samples => {
+  const output = Buffer.allocUnsafe(samples.length * 2);
+
+  for (let index = 0; index < samples.length; index += 1) {
+    output.writeInt16LE(samples[index], index * 2);
+  }
+
+  return output;
+};
+
+const normalizeTranscriptionAudioChunk = ({
+  audioBuffer,
+  bitsPerSample,
+  sampleRate,
+  numberOfChannels,
+}) => {
+  const resolvedBitsPerSample =
+    Number(bitsPerSample) || TRANSCRIPTION_DEFAULT_BITS_PER_SAMPLE;
+  const resolvedSampleRate =
+    Number(sampleRate) || TRANSCRIPTION_INPUT_SAMPLE_RATE;
+  const resolvedChannelCount =
+    Number(numberOfChannels) || TRANSCRIPTION_DEFAULT_CHANNELS;
+
+  const decodedSamples = decodePcmBuffer(audioBuffer, resolvedBitsPerSample);
+  const monoSamples = downmixToMono(decodedSamples, resolvedChannelCount);
+  const resampledSamples = resamplePcm16(
+    monoSamples,
+    resolvedSampleRate,
+    TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+  );
+
+  return pcm16ToBuffer(resampledSamples);
+};
+
+setInterval(() => {
+  const cutoff = Date.now() - TRANSCRIPTION_SESSION_TTL_MS;
+
+  transcriptionSessions.forEach((session, sessionKey) => {
+    if (session.updatedAt < cutoff) {
+      destroyTranscriptionSession(sessionKey);
+    }
+  });
+}, 60 * 1000);
 
 // ============================================================
 // POST /create-token
@@ -202,6 +594,7 @@ app.post("/leave-room", async (req, res) => {
     }
 
     const participant = removeParticipantFromRoom(roomName, participantId);
+    destroyTranscriptionSession(getTranscriptionSessionKey(roomName, participantId));
     const room = rooms.get(roomName);
 
     cleanupMeetingIfRoomEmpty(roomName);
@@ -549,6 +942,7 @@ app.post("/meetings/kick", async (req, res) => {
 
     meeting.participantStatuses.set(participantId, "kicked");
     removeParticipantFromRoom(roomName, participantId);
+    destroyTranscriptionSession(getTranscriptionSessionKey(roomName, participantId));
     await removeLiveKitParticipant(roomName, participantId);
     cleanupMeetingIfRoomEmpty(roomName);
 
@@ -651,9 +1045,11 @@ app.post("/meetings/leave", async (req, res) => {
 
     if (participantId === meeting.hostParticipantId) {
       meetings.delete(roomName);
+      destroyTranscriptionSessionsForRoom(roomName);
       await deleteLiveKitRoom(roomName);
     } else {
       meeting.participantStatuses.delete(participantId);
+      destroyTranscriptionSession(getTranscriptionSessionKey(roomName, participantId));
       cleanupMeetingIfRoomEmpty(roomName);
     }
 
@@ -687,6 +1083,178 @@ app.get("/room-participants", (req, res) => {
 });
 
 // ============================================================
+// GET /transcription/status
+// Report whether offline transcription is ready on the backend
+// ============================================================
+app.get("/transcription/status", async (req, res) => {
+  const availability = await getTranscriptionAvailability();
+
+  return res.json({
+    available: availability.available,
+    reason: availability.reason || null,
+    inputSampleRate: TRANSCRIPTION_INPUT_SAMPLE_RATE,
+    outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+    modelPath: TRANSCRIPTION_MODEL_PATH,
+    pythonBin: TRANSCRIPTION_PYTHON_BIN,
+  });
+});
+
+// ============================================================
+// POST /transcription/start
+// Create or reset one participant transcription session
+// ============================================================
+app.post("/transcription/start", async (req, res) => {
+  try {
+    const { roomName, participantId } = req.body;
+
+    if (!roomName || !participantId) {
+      return res.status(400).json({
+        error: "Missing required fields: roomName and participantId",
+      });
+    }
+
+    const availability = await getTranscriptionAvailability();
+    if (!availability.available) {
+      return res.status(503).json({
+        error: availability.reason,
+      });
+    }
+
+    const sessionKey = await ensureTranscriptionSession(roomName, participantId);
+
+    return res.json({
+      success: true,
+      sessionId: sessionKey,
+      sampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+    });
+  } catch (error) {
+    console.error("Error starting transcription session:", error);
+    return res.status(500).json({
+      error: "Failed to start transcription session",
+      details: error.message,
+    });
+  }
+});
+
+// ============================================================
+// POST /transcription/chunk
+// Accept a raw PCM chunk and return partial/final text
+// ============================================================
+app.post("/transcription/chunk", async (req, res) => {
+  try {
+    const {
+      sessionId,
+      audioBase64,
+      bitsPerSample,
+      sampleRate,
+      numberOfChannels,
+    } = req.body;
+
+    if (!sessionId || !audioBase64) {
+      return res.status(400).json({
+        error: "Missing required fields: sessionId and audioBase64",
+      });
+    }
+
+    const session = transcriptionSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        error: "Transcription session not found",
+      });
+    }
+
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    session.updatedAt = Date.now();
+
+    if (audioBuffer.length === 0) {
+      return res.json({
+        text: "",
+        isFinal: false,
+      });
+    }
+
+    const normalizedAudioBuffer = normalizeTranscriptionAudioChunk({
+      audioBuffer,
+      bitsPerSample,
+      sampleRate,
+      numberOfChannels,
+    });
+
+    if (normalizedAudioBuffer.length === 0) {
+      return res.json({
+        text: "",
+        isFinal: false,
+      });
+    }
+
+    const workerResponse = await sendTranscriptionWorkerRequest("chunk", {
+      sessionId,
+      audioBase64: normalizedAudioBuffer.toString("base64"),
+    });
+    const text = String(workerResponse.text || "").trim();
+
+    return res.json({
+      text,
+      isFinal: !!workerResponse.isFinal,
+    });
+  } catch (error) {
+    console.error("Error processing transcription chunk:", error);
+    return res.status(500).json({
+      error: "Failed to process transcription chunk",
+      details: error.message,
+    });
+  }
+});
+
+// ============================================================
+// POST /transcription/stop
+// Finalize and destroy one participant transcription session
+// ============================================================
+app.post("/transcription/stop", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      return res.status(400).json({
+        error: "Missing required field: sessionId",
+      });
+    }
+
+    const session = clearTranscriptionSession(sessionId);
+    if (!session) {
+      return res.json({
+        success: true,
+        text: "",
+      });
+    }
+
+    let text = "";
+    try {
+      const workerResponse = await sendTranscriptionWorkerRequest("stop", {
+        sessionId,
+      });
+      text = String(workerResponse.text || "").trim();
+    } catch (error) {
+      console.warn(
+        "[Transcription] Failed to finalize Python transcription session:",
+        error?.message || error,
+      );
+    }
+
+    return res.json({
+      success: true,
+      text,
+    });
+  } catch (error) {
+    console.error("Error stopping transcription session:", error);
+    return res.status(500).json({
+      error: "Failed to stop transcription session",
+      details: error.message,
+    });
+  }
+});
+
+// ============================================================
 // GET /rooms — list active rooms (debug endpoint)
 // ============================================================
 app.get("/rooms", (req, res) => {
@@ -698,6 +1266,23 @@ app.get("/rooms", (req, res) => {
     };
   });
   return res.json({ rooms: roomList });
+});
+
+const shutdownTranscriptionWorker = () => {
+  if (transcriptionWorker && !transcriptionWorker.killed) {
+    transcriptionWorker.kill();
+  }
+  cleanupTranscriptionWorker("Python transcription worker was stopped.");
+};
+
+process.on("exit", shutdownTranscriptionWorker);
+process.on("SIGINT", () => {
+  shutdownTranscriptionWorker();
+  process.exit(0);
+});
+process.on("SIGTERM", () => {
+  shutdownTranscriptionWorker();
+  process.exit(0);
 });
 
 // ============================================================

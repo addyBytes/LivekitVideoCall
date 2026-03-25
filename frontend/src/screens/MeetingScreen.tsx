@@ -673,9 +673,11 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
 
       <VideoRoomContent
         localParticipantId={participantId}
+        localParticipantName={participantName}
         roomName={roomName}
         onLeave={leaveMeetingState}
         hiddenParticipantIds={hiddenParticipantIds}
+        enableTranscription={true}
       />
     </LiveKitRoom>
   );

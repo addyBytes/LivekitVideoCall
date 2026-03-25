@@ -13,7 +13,7 @@ const NGROK_URL = 'https://queasier-tartily-susan.ngrok-free.dev/';
 // export const API_BASE_URL = NGROK_URL;
 
 // For Android Emulator local testing:
-export const API_BASE_URL = 'http://10.1.5.45:5002';
+export const API_BASE_URL = 'http://10.1.5.78:5002';
 
 // For iOS Simulator local testing:
 // export const API_BASE_URL = 'http://localhost:5002';

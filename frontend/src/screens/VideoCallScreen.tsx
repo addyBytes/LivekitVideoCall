@@ -21,6 +21,7 @@ import {
   TouchableOpacity,
   AppState,
   AppStateStatus,
+  Alert,
   NativeModules,
   Platform,
   useWindowDimensions,
@@ -56,6 +57,9 @@ import type {
 // ============================================================
 const PREVIEW_RATIO = 16 / 9;
 const ROOM_PARTICIPANTS_POLL_INTERVAL = 2000;
+const TRANSCRIPT_ENTRY_TTL_MS = 6000;
+const MAX_TRANSCRIPT_ENTRIES = 4;
+const TRANSCRIPTION_CHUNK_INTERVAL_MS = 2500;
 const PipModule = NativeModules.PipModule as
   | {
       setInCallPipEnabled?: (enabled: boolean) => void;
@@ -77,23 +81,66 @@ interface PipModeChangeEvent {
   isPip?: boolean;
 }
 
+interface TranscriptEntry {
+  participantId: string;
+  participantName: string;
+  text: string;
+  updatedAt: number;
+}
+
+interface TranscriptStatus {
+  tone: 'idle' | 'listening' | 'error';
+  message: string;
+}
+
+interface TranscriptDataMessage {
+  type: 'transcript';
+  participantId: string;
+  participantName: string;
+  text: string;
+  isFinal?: boolean;
+  clear?: boolean;
+}
+
+interface TranscriptControlMessage {
+  type: 'transcription-control';
+  action: 'start' | 'stop';
+  requestedBy: string;
+}
+
+interface TranscriptAudioChunkMetadata {
+  bitsPerSample?: number;
+  sampleRate?: number;
+  numberOfChannels?: number;
+  numberOfFrames?: number;
+}
+
+interface TranscriptAudioChunk {
+  audioBase64: string;
+  metadata?: TranscriptAudioChunkMetadata;
+}
+
 // ============================================================
 // Room Content (rendered inside LiveKitRoom)
 // ============================================================
 interface RoomContentProps {
   localParticipantId: string;
+  localParticipantName?: string;
   roomName: string;
   onLeave: () => void;
   overlay?: React.ReactNode;
   hiddenParticipantIds?: string[];
+  enableTranscription?: boolean;
 }
 
 export const VideoRoomContent: React.FC<RoomContentProps> = ({
   localParticipantId,
+  localParticipantName,
   roomName,
   onLeave,
   overlay,
   hiddenParticipantIds = [],
+  enableTranscription = false,
 }) => {
   const room = useRoomContext();
   const participants = useParticipants();
@@ -117,6 +164,12 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const [isLocalMain, setIsLocalMain] = useState(false);
   const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
   const [pinnedParticipantId, setPinnedParticipantId] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
+  const [transcriptStatus, setTranscriptStatus] = useState<TranscriptStatus>({
+    tone: 'idle',
+    message: '',
+  });
   const mediaEnabledRef = useRef(false);
   const [trackUpdate, setTrackUpdate] = useState(0);
   const [emojiBursts, setEmojiBursts] = useState<EmojiBurst[]>([]);
@@ -124,6 +177,27 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const isTogglingScreenShareRef = useRef(false);
   const suppressAutoPipUntilRef = useRef(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const transcriptionActiveRef = useRef(false);
+  const transcriptMessageHandlerRef = useRef<
+    (message: TranscriptDataMessage) => void
+  >(() => {});
+  const transcriptionControlHandlerRef = useRef<
+    (message: TranscriptControlMessage) => void
+  >(() => {});
+  const publishTranscriptMessageRef = useRef<
+    (message: TranscriptDataMessage) => Promise<void>
+  >(async () => {});
+  const transcriptionLocalMetaRef = useRef({
+    participantId: localParticipantId,
+    participantName: localParticipantName || localParticipantId,
+  });
+  const transcriptionSessionIdRef = useRef<string | null>(null);
+  const transcriptionRecorderRef = useRef<any>(null);
+  const transcriptionChunkIntervalRef = useRef<ReturnType<
+    typeof setInterval
+  > | null>(null);
+  const transcriptionChunkQueueRef = useRef<TranscriptAudioChunk[]>([]);
+  const transcriptionChunkProcessingRef = useRef(false);
 
   const visibleParticipants = useMemo(
     () =>
@@ -348,9 +422,22 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     const onDataReceived = (payload: Uint8Array, participant: any) => {
       try {
         const str = Buffer.from(payload).toString('utf8');
-        const data = JSON.parse(str);
+        const data = JSON.parse(str) as
+          | { type?: 'emoji'; emoji?: string }
+          | TranscriptDataMessage
+          | TranscriptControlMessage;
         if (data.type === 'emoji' && typeof data.emoji === 'string') {
           triggerEmojiBurst(data.emoji);
+          return;
+        }
+
+        if (data.type === 'transcript') {
+          transcriptMessageHandlerRef.current(data);
+          return;
+        }
+
+        if (data.type === 'transcription-control') {
+          transcriptionControlHandlerRef.current(data);
         }
       } catch (err) {
         console.warn('Failed to parse received data message:', err);
@@ -383,6 +470,453 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   );
 
   const localIdentity = room.localParticipant?.identity || localParticipantId;
+  const localDisplayName =
+    room.localParticipant?.name || localParticipantName || localIdentity;
+
+  useEffect(() => {
+    transcriptionLocalMetaRef.current = {
+      participantId: localIdentity,
+      participantName: localDisplayName,
+    };
+  }, [localDisplayName, localIdentity]);
+
+  const handleIncomingTranscriptMessage = useCallback(
+    (message: TranscriptDataMessage) => {
+      if (!enableTranscription || !transcriptionActiveRef.current) {
+        return;
+      }
+
+      if (message.clear) {
+        setTranscriptEntries(currentEntries =>
+          currentEntries.filter(
+            entry => entry.participantId !== message.participantId,
+          ),
+        );
+        return;
+      }
+
+      const nextText = message.text.trim();
+      if (!nextText) {
+        return;
+      }
+
+      setTranscriptStatus({
+        tone: 'listening',
+        message: 'Listening for speech...',
+      });
+
+      setTranscriptEntries(currentEntries => {
+        const nextEntries = currentEntries.filter(
+          entry => entry.participantId !== message.participantId,
+        );
+
+        nextEntries.unshift({
+          participantId: message.participantId,
+          participantName: message.participantName,
+          text: nextText,
+          updatedAt: Date.now(),
+        });
+
+        return nextEntries
+          .sort((left, right) => right.updatedAt - left.updatedAt)
+          .slice(0, MAX_TRANSCRIPT_ENTRIES);
+      });
+    },
+    [enableTranscription],
+  );
+
+  useEffect(() => {
+    transcriptMessageHandlerRef.current = handleIncomingTranscriptMessage;
+  }, [handleIncomingTranscriptMessage]);
+
+  const publishTranscriptMessage = useCallback(
+    async (message: TranscriptDataMessage) => {
+      if (!enableTranscription) {
+        return;
+      }
+
+      try {
+        const payload = Uint8Array.from(
+          Buffer.from(JSON.stringify(message), 'utf8'),
+        );
+        await room.localParticipant.publishData(payload, {
+          reliable: !!message.isFinal || !!message.clear,
+        });
+      } catch (error) {
+        console.warn('[Transcription] Failed to publish transcript:', error);
+      }
+    },
+    [enableTranscription, room],
+  );
+
+  useEffect(() => {
+    publishTranscriptMessageRef.current = publishTranscriptMessage;
+  }, [publishTranscriptMessage]);
+
+  const publishTranscriptionControl = useCallback(
+    async (action: 'start' | 'stop') => {
+      if (!enableTranscription) {
+        return;
+      }
+
+      try {
+        const payload = Uint8Array.from(
+          Buffer.from(
+            JSON.stringify({
+              type: 'transcription-control',
+              action,
+              requestedBy: localIdentity,
+            } satisfies TranscriptControlMessage),
+            'utf8',
+          ),
+        );
+        await room.localParticipant.publishData(payload, { reliable: true });
+      } catch (error) {
+        console.warn('[Transcription] Failed to publish control message:', error);
+      }
+    },
+    [enableTranscription, localIdentity, room],
+  );
+
+  const processQueuedTranscriptionChunks = useCallback(async () => {
+    if (
+      transcriptionChunkProcessingRef.current ||
+      !transcriptionActiveRef.current ||
+      !transcriptionSessionIdRef.current
+    ) {
+      return;
+    }
+
+    transcriptionChunkProcessingRef.current = true;
+
+    try {
+      while (
+        transcriptionChunkQueueRef.current.length > 0 &&
+        transcriptionActiveRef.current &&
+        transcriptionSessionIdRef.current
+      ) {
+        const chunk = transcriptionChunkQueueRef.current.shift();
+        if (!chunk) {
+          continue;
+        }
+
+        const response = await fetch(`${API_BASE_URL}/transcription/chunk`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: transcriptionSessionIdRef.current,
+            audioBase64: chunk.audioBase64,
+            bitsPerSample: chunk.metadata?.bitsPerSample,
+            sampleRate: chunk.metadata?.sampleRate,
+            numberOfChannels: chunk.metadata?.numberOfChannels,
+            numberOfFrames: chunk.metadata?.numberOfFrames,
+          }),
+        });
+
+        const data: { text?: string; isFinal?: boolean; error?: string } =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to process transcription chunk');
+        }
+
+        const text = data.text?.trim();
+        if (!text) {
+          setTranscriptStatus({
+            tone: 'listening',
+            message: 'Listening for speech...',
+          });
+          continue;
+        }
+
+        setTranscriptStatus({
+          tone: 'listening',
+          message: 'Transcribing live...',
+        });
+
+        const { participantId, participantName } =
+          transcriptionLocalMetaRef.current;
+
+        const transcriptMessage: TranscriptDataMessage = {
+          type: 'transcript',
+          participantId,
+          participantName,
+          text,
+          isFinal: !!data.isFinal,
+        };
+
+        handleIncomingTranscriptMessage(transcriptMessage);
+        await publishTranscriptMessageRef.current(transcriptMessage);
+      }
+    } catch (error) {
+      console.warn('[Transcription] Failed while processing chunks:', error);
+      setTranscriptStatus({
+        tone: 'error',
+        message: 'Transcription backend is unavailable.',
+      });
+    } finally {
+      transcriptionChunkProcessingRef.current = false;
+    }
+  }, [handleIncomingTranscriptMessage]);
+
+  const startLocalTranscription = useCallback(
+    async (showAlertOnFailure: boolean) => {
+      if (!enableTranscription || transcriptionActiveRef.current) {
+        return true;
+      }
+
+      const microphonePublication = room.localParticipant.getTrackPublication(
+        Track.Source.Microphone,
+      );
+      const localAudioTrack = microphonePublication?.audioTrack;
+      const mediaStream = localAudioTrack?.mediaStream;
+
+      if (!mediaStream) {
+        setTranscriptStatus({
+          tone: 'error',
+          message: 'Microphone audio is not available for transcription.',
+        });
+        if (showAlertOnFailure) {
+          Alert.alert(
+            'Transcription Failed',
+            'Microphone audio is not available for transcription.',
+          );
+        }
+        return false;
+      }
+
+      const RecorderCtor = (globalThis as typeof globalThis & {
+        MediaRecorder?: new (stream: MediaStream) => {
+          addEventListener: (
+            eventName: 'dataavailable',
+            listener: (event: any) => void,
+          ) => void;
+          start: () => void;
+          stop?: () => void;
+          requestData?: () => void;
+        };
+      }).MediaRecorder;
+      if (!RecorderCtor) {
+        setTranscriptStatus({
+          tone: 'error',
+          message: 'Audio recorder is not available on this device.',
+        });
+        if (showAlertOnFailure) {
+          Alert.alert(
+            'Transcription Failed',
+            'Audio recorder is not available on this device.',
+          );
+        }
+        return false;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/transcription/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomName,
+            participantId: localIdentity,
+          }),
+        });
+        const data: { sessionId?: string; error?: string } = await response.json();
+
+        if (!response.ok || !data.sessionId) {
+          throw new Error(
+            data.error || 'Meeting transcription backend could not start.',
+          );
+        }
+
+        const recorder = new RecorderCtor(mediaStream);
+        recorder.addEventListener('dataavailable', (event: any) => {
+          const byteArray = event?.data?.byteArray as Uint8Array | undefined;
+          const metadata = event?.data?.metadata as
+            | TranscriptAudioChunkMetadata
+            | undefined;
+
+          if (
+            !byteArray ||
+            byteArray.length === 0 ||
+            !transcriptionActiveRef.current
+          ) {
+            return;
+          }
+
+          transcriptionChunkQueueRef.current.push({
+            audioBase64: Buffer.from(byteArray).toString('base64'),
+            metadata,
+          });
+          void processQueuedTranscriptionChunks();
+        });
+
+        transcriptionSessionIdRef.current = data.sessionId;
+        transcriptionRecorderRef.current = recorder;
+        transcriptionChunkQueueRef.current = [];
+        transcriptionActiveRef.current = true;
+        setTranscriptEntries([]);
+        setTranscriptStatus({
+          tone: 'listening',
+          message: 'Listening for speech...',
+        });
+        setIsTranscribing(true);
+
+        recorder.start();
+        transcriptionChunkIntervalRef.current = setInterval(() => {
+          try {
+            transcriptionRecorderRef.current?.requestData?.();
+          } catch (error) {
+            console.warn('[Transcription] Failed to request recorder data:', error);
+          }
+        }, TRANSCRIPTION_CHUNK_INTERVAL_MS);
+
+        return true;
+      } catch (error) {
+        transcriptionActiveRef.current = false;
+        setIsTranscribing(false);
+        setTranscriptEntries([]);
+        setTranscriptStatus({
+          tone: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not start meeting transcription.',
+        });
+
+        if (showAlertOnFailure) {
+          Alert.alert(
+            'Transcription Failed',
+            error instanceof Error
+              ? error.message
+              : 'Could not start meeting transcription.',
+          );
+        }
+
+        return false;
+      }
+    },
+    [enableTranscription, localIdentity, room, roomName, processQueuedTranscriptionChunks],
+  );
+
+  const stopLocalTranscription = useCallback(
+    async (notifyRoom: boolean) => {
+      transcriptionActiveRef.current = false;
+
+      if (transcriptionChunkIntervalRef.current) {
+        clearInterval(transcriptionChunkIntervalRef.current);
+        transcriptionChunkIntervalRef.current = null;
+      }
+
+      try {
+        transcriptionRecorderRef.current?.requestData?.();
+      } catch {
+        // Best effort flush before stop.
+      }
+
+      try {
+        transcriptionRecorderRef.current?.stop?.();
+      } catch {
+        // Ignore recorder stop failures.
+      }
+
+      transcriptionRecorderRef.current = null;
+      transcriptionChunkQueueRef.current = [];
+      transcriptionChunkProcessingRef.current = false;
+
+      const sessionId = transcriptionSessionIdRef.current;
+      transcriptionSessionIdRef.current = null;
+
+      if (sessionId) {
+        try {
+          await fetch(`${API_BASE_URL}/transcription/stop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId }),
+          });
+        } catch (error) {
+          console.warn('[Transcription] Failed to stop backend session:', error);
+        }
+      }
+
+      setIsTranscribing(false);
+      setTranscriptEntries([]);
+      setTranscriptStatus({
+        tone: 'idle',
+        message: '',
+      });
+
+      if (notifyRoom) {
+        await publishTranscriptMessage({
+          type: 'transcript',
+          participantId: localIdentity,
+          participantName: localDisplayName,
+          text: '',
+          isFinal: true,
+          clear: true,
+        });
+      }
+    },
+    [localDisplayName, localIdentity, publishTranscriptMessage],
+  );
+
+  const handleIncomingTranscriptionControl = useCallback(
+    (message: TranscriptControlMessage) => {
+      if (!enableTranscription) {
+        return;
+      }
+
+      if (message.action === 'start') {
+        if (!transcriptionActiveRef.current) {
+          void startLocalTranscription(false);
+        }
+        return;
+      }
+
+      if (message.action === 'stop') {
+        void stopLocalTranscription(false);
+      }
+    },
+    [enableTranscription, startLocalTranscription, stopLocalTranscription],
+  );
+
+  useEffect(() => {
+    transcriptionControlHandlerRef.current = handleIncomingTranscriptionControl;
+  }, [handleIncomingTranscriptionControl]);
+
+  useEffect(() => {
+    transcriptionActiveRef.current = isTranscribing;
+
+    if (!isTranscribing) {
+      setTranscriptEntries([]);
+      setTranscriptStatus({
+        tone: 'idle',
+        message: '',
+      });
+    } else {
+      setTranscriptStatus(currentStatus =>
+        currentStatus.message
+          ? currentStatus
+          : {
+              tone: 'listening',
+              message: 'Listening for speech...',
+            },
+      );
+    }
+  }, [isTranscribing]);
+
+  useEffect(() => {
+    if (!enableTranscription || !isTranscribing) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const cutoff = Date.now() - TRANSCRIPT_ENTRY_TTL_MS;
+      setTranscriptEntries(currentEntries =>
+        currentEntries.filter(entry => entry.updatedAt >= cutoff),
+      );
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [enableTranscription, isTranscribing]);
 
   const remoteParticipants = useMemo(
     () =>
@@ -593,6 +1127,29 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     [room, triggerEmojiBurst],
   );
 
+  const handleToggleTranscription = useCallback(async () => {
+    if (!enableTranscription) {
+      return;
+    }
+
+    if (isTranscribing) {
+      await publishTranscriptionControl('stop');
+      await stopLocalTranscription(true);
+      return;
+    }
+
+    const started = await startLocalTranscription(true);
+    if (started) {
+      await publishTranscriptionControl('start');
+    }
+  }, [
+    enableTranscription,
+    isTranscribing,
+    publishTranscriptionControl,
+    startLocalTranscription,
+    stopLocalTranscription,
+  ]);
+
   const handlePinParticipant = useCallback((participantIdentity: string) => {
     setPinnedParticipantId(participantIdentity);
     setShowParticipants(false);
@@ -650,7 +1207,6 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       } else {
         await room.localParticipant.setCameraEnabled(false);
       }
-
       setIsCameraEnabled(nextEnabled);
       console.log(`[Camera] ${nextEnabled ? 'Enabled' : 'Disabled'}`);
     } catch (error) {
@@ -658,85 +1214,27 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     }
   }, [room, isCameraEnabled, isFrontCamera]);
 
-  // Switch front/back camera while keeping current enabled state
+  // Switch camera (front/back)
   const handleSwitchCamera = useCallback(async () => {
-    if (!isCameraEnabled) return;
-
     try {
       const nextIsFront = !isFrontCamera;
       const nextFacingMode = nextIsFront ? 'user' : 'environment';
 
-      // Get currently published local camera track.
-      const cameraPublication = room.localParticipant.getTrackPublication(
-        Track.Source.Camera,
-      );
-      const localVideoTrack = cameraPublication?.videoTrack;
-
-      if (!localVideoTrack) {
-        // If no track exists (edge case), publish camera with target facing mode.
-        await room.localParticipant.setCameraEnabled(true, {
-          resolution: {
-            width: 640,
-            height: 480,
-          },
-          frameRate: 30,
-          facingMode: nextFacingMode,
-        });
-      } else {
-        const mediaTrack = localVideoTrack.mediaStreamTrack as any;
-        const settings = mediaTrack?.getSettings?.() ?? {};
-        const currentDeviceId = settings.deviceId as string | undefined;
-
-        // Primary path: switch by explicit deviceId for better cross-device behavior.
-        const videoDevices = await Room.getLocalDevices('videoinput', true);
-        if (videoDevices.length >= 2) {
-          const frontRegex = /(front|user|selfie)/i;
-          const backRegex = /(back|rear|environment)/i;
-          const targetRegex = nextIsFront ? frontRegex : backRegex;
-
-          let targetDevice =
-            videoDevices.find(
-              d => d.deviceId !== currentDeviceId && targetRegex.test(d.label || ''),
-            ) ??
-            videoDevices.find(d => d.deviceId !== currentDeviceId);
-
-          if (!targetDevice && currentDeviceId) {
-            const currentIdx = videoDevices.findIndex(d => d.deviceId === currentDeviceId);
-            if (currentIdx >= 0) {
-              targetDevice = videoDevices[(currentIdx + 1) % videoDevices.length];
+      if (isCameraEnabled) {
+        const currentCameraTrack = localCameraTrackRef?.publication?.track as
+          | {
+              restartTrack?: (options?: {
+                facingMode?: 'user' | 'environment';
+              }) => Promise<void>;
             }
-          }
+          | undefined;
 
-          if (targetDevice && targetDevice.deviceId !== currentDeviceId) {
-            const switched = await localVideoTrack.setDeviceId(targetDevice.deviceId);
-            if (switched) {
-              setIsFrontCamera(nextIsFront);
-              console.log(`[Camera] Switched to ${nextIsFront ? 'front' : 'back'} camera via deviceId`);
-              return;
-            }
-          }
-        }
-
-        // Primary path: force camera re-acquire with the new facing mode.
-        // This is the most reliable approach on React Native devices.
-        try {
-          await localVideoTrack.restartTrack({
-            resolution: {
-              width: 640,
-              height: 480,
-            },
-            frameRate: 30,
-            facingMode: nextFacingMode,
-          });
-        } catch (restartError) {
-          // Fallback path for devices where restartTrack isn't available/reliable.
-          if (typeof mediaTrack?._switchCamera === 'function') {
-            mediaTrack._switchCamera();
-          } else if (typeof mediaTrack?.applyConstraints === 'function') {
-            await mediaTrack.applyConstraints({
+        if (currentCameraTrack?.restartTrack) {
+          try {
+            await currentCameraTrack.restartTrack({
               facingMode: nextFacingMode,
             });
-          } else {
+          } catch (restartError) {
             // Hard fallback: force camera republish with new facing mode.
             await room.localParticipant.setCameraEnabled(false);
             await room.localParticipant.setCameraEnabled(true, {
@@ -759,7 +1257,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     } catch (error) {
       console.error('Failed to switch camera:', error);
     }
-  }, [room, isCameraEnabled, isFrontCamera]);
+  }, [room, isCameraEnabled, isFrontCamera, localCameraTrackRef]);
 
   // Leave room
   const handleLeaveRoom = useCallback(async () => {
@@ -767,6 +1265,10 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       console.log(`\n========================`);
       console.log(`  LEFT ROOM ${roomName}`);
       console.log(`========================\n`);
+
+      if (enableTranscription && transcriptionActiveRef.current) {
+        await stopLocalTranscription(true);
+      }
 
       try {
         await fetch(`${API_BASE_URL}/leave-room`, {
@@ -787,7 +1289,14 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     } finally {
       onLeave();
     }
-  }, [room, roomName, localParticipantId, onLeave]);
+  }, [
+    enableTranscription,
+    localParticipantId,
+    onLeave,
+    room,
+    roomName,
+    stopLocalTranscription,
+  ]);
 
   if (isPip || forceVideoOnly) {
     // Only show main video in PiP mode or when forceVideoOnly is set (no preview, no overlays, no ControlsBar)
@@ -827,6 +1336,21 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         <Text style={styles.roomTitle}>{roomName}</Text>
         <Text style={styles.roomSubtitle}>{visibleParticipants.length} participant(s)</Text>
       </View>
+      {enableTranscription ? (
+        <TouchableOpacity
+          style={[
+            styles.transcriptionButton,
+            isTranscribing && styles.transcriptionButtonActive,
+            pinnedParticipant && styles.transcriptionButtonPinnedOffset,
+          ]}
+          onPress={handleToggleTranscription}
+          activeOpacity={0.88}
+        >
+          <Text style={styles.transcriptionButtonText}>
+            {isTranscribing ? 'Stop' : 'Transcribe'}
+          </Text>
+        </TouchableOpacity>
+      ) : null}
       {pinnedParticipant ? (
         <View style={styles.pinnedBanner}>
           <Text style={styles.pinnedBannerText}>
@@ -945,6 +1469,35 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
             {burst.emoji}
           </Animated.Text>
         ))}
+        {enableTranscription && isTranscribing && transcriptEntries.length > 0 ? (
+          <View style={styles.transcriptOverlay}>
+            {transcriptEntries.map(entry => (
+              <View
+                key={`${entry.participantId}-${entry.updatedAt}`}
+                style={styles.transcriptBubble}
+              >
+                <Text style={styles.transcriptSpeaker} numberOfLines={1}>
+                  {entry.participantName}
+                </Text>
+                <Text style={styles.transcriptText}>{entry.text}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        {enableTranscription && isTranscribing && transcriptStatus.message ? (
+          <View style={styles.transcriptStatusOverlay}>
+            <View
+              style={[
+                styles.transcriptStatusBadge,
+                transcriptStatus.tone === 'error' && styles.transcriptStatusBadgeError,
+              ]}
+            >
+              <Text style={styles.transcriptStatusText}>
+                {transcriptStatus.message}
+              </Text>
+            </View>
+          </View>
+        ) : null}
       </View>
       {/* Only render ControlsBar and ParticipantList if not in PiP mode */}
       {!isPip && (
@@ -1161,6 +1714,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       >
         <VideoRoomContent
           localParticipantId={participantId}
+          localParticipantName={participantName}
           roomName={roomName}
           onLeave={onLeave}
         />
@@ -1262,6 +1816,29 @@ const styles = StyleSheet.create({
     fontSize: 34,
     zIndex: 30,
   },
+  transcriptionButton: {
+    position: 'absolute',
+    top: 44,
+    alignSelf: 'center',
+    zIndex: 28,
+    backgroundColor: 'rgba(14, 165, 233, 0.92)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  transcriptionButtonActive: {
+    backgroundColor: 'rgba(239, 68, 68, 0.92)',
+  },
+  transcriptionButtonPinnedOffset: {
+    top: 90,
+  },
+  transcriptionButtonText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
   pinnedBanner: {
     position: 'absolute',
     top: 44,
@@ -1335,6 +1912,63 @@ const styles = StyleSheet.create({
   pageDotActive: {
     width: 20,
     backgroundColor: '#6366f1',
+  },
+  transcriptOverlay: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    bottom: 96,
+    zIndex: 24,
+    gap: 8,
+  },
+  transcriptStatusOverlay: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    bottom: 60,
+    zIndex: 23,
+    alignItems: 'center',
+  },
+  transcriptStatusBadge: {
+    maxWidth: 420,
+    backgroundColor: 'rgba(14, 165, 233, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(125, 211, 252, 0.4)',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  transcriptStatusBadgeError: {
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+    borderColor: 'rgba(248, 113, 113, 0.42)',
+  },
+  transcriptStatusText: {
+    color: '#e5eef8',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  transcriptBubble: {
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 560,
+    backgroundColor: 'rgba(8, 12, 22, 0.88)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.2)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  transcriptSpeaker: {
+    color: '#7dd3fc',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  transcriptText: {
+    color: '#f8fafc',
+    fontSize: 15,
+    lineHeight: 21,
   },
   noVideoContainer: {
     flex: 1,
