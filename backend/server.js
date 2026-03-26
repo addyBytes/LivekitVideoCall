@@ -1,9 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const readline = require("readline");
-const { spawn } = require("child_process");
+require("dotenv").config();
+const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 const { AccessToken, RoomServiceClient } = require("livekit-server-sdk");
 const { v4: uuidv4 } = require("uuid");
 
@@ -31,16 +29,21 @@ const TRANSCRIPTION_OUTPUT_SAMPLE_RATE =
   Number(process.env.TRANSCRIPTION_OUTPUT_SAMPLE_RATE) || 16000;
 const TRANSCRIPTION_DEFAULT_BITS_PER_SAMPLE = 16;
 const TRANSCRIPTION_DEFAULT_CHANNELS = 1;
-const TRANSCRIPTION_MODEL_PATH =
-  process.env.VOSK_MODEL_PATH ||
-  path.join(__dirname, "models", "vosk-model");
 const TRANSCRIPTION_SESSION_TTL_MS = 10 * 60 * 1000;
-const TRANSCRIPTION_PYTHON_BIN =
-  process.env.TRANSCRIPTION_PYTHON_BIN || "python";
-const TRANSCRIPTION_WORKER_PATH = path.join(
-  __dirname,
-  "transcription_worker.py",
-);
+const TRANSCRIPTION_RESULT_WAIT_MS =
+  Number(process.env.TRANSCRIPTION_RESULT_WAIT_MS) || 1200;
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || "";
+const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || "nova-3";
+const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE || "en-US";
+const DEEPGRAM_ENDPOINTING =
+  Number(process.env.DEEPGRAM_ENDPOINTING) || 250;
+const DEEPGRAM_UTTERANCE_END_MS =
+  Number(process.env.DEEPGRAM_UTTERANCE_END_MS) || 1000;
+const DEEPGRAM_SMART_FORMAT = true;
+const DEEPGRAM_PUNCTUATE = true;
+const DEEPGRAM_INTERIM_RESULTS = true;
+const DEEPGRAM_VAD_EVENTS = true;
+const DEEPGRAM_CHANNELS = 1;
 
 // ============================================================
 // In-memory room tracking
@@ -54,10 +57,7 @@ const roomService = new RoomServiceClient(
   LIVEKIT_API_SECRET,
 );
 const transcriptionSessions = new Map();
-const transcriptionPendingRequests = new Map();
-let transcriptionWorker = null;
-let transcriptionWorkerReadline = null;
-let transcriptionWorkerRequestCounter = 0;
+let deepgramClient = null;
 
 app.use(cors());
 app.use(express.json({ limit: "8mb" }));
@@ -187,223 +187,324 @@ const deleteLiveKitRoom = async roomName => {
 const getTranscriptionSessionKey = (roomName, participantId) =>
   `${roomName}:${participantId}`;
 
-const clearTranscriptionSession = sessionKey => {
+const getDeepgramClient = () => {
+  if (deepgramClient) {
+    return deepgramClient;
+  }
+
+  if (!DEEPGRAM_API_KEY) {
+    throw new Error("Missing DEEPGRAM_API_KEY.");
+  }
+
+  deepgramClient = createClient(DEEPGRAM_API_KEY);
+  return deepgramClient;
+};
+
+const clearTranscriptWaiters = session => {
+  if (!session?.pendingResolvers) {
+    return;
+  }
+
+  session.pendingResolvers.forEach(({ timeout }) => clearTimeout(timeout));
+  session.pendingResolvers = [];
+};
+
+const rejectTranscriptWaiters = (session, error) => {
+  if (!session?.pendingResolvers) {
+    return;
+  }
+
+  session.pendingResolvers.forEach(({ timeout, reject }) => {
+    clearTimeout(timeout);
+    reject(error);
+  });
+  session.pendingResolvers = [];
+};
+
+const resolveTranscriptWaiters = (session, payload) => {
+  if (!session?.pendingResolvers || session.pendingResolvers.length === 0) {
+    return;
+  }
+
+  const resolvers = session.pendingResolvers.splice(0);
+  resolvers.forEach(({ timeout, resolve }) => {
+    clearTimeout(timeout);
+    resolve(payload);
+  });
+};
+
+const getTranscriptionSession = sessionKey => transcriptionSessions.get(sessionKey);
+
+const removeTranscriptionSession = sessionKey => {
   const session = transcriptionSessions.get(sessionKey);
   if (!session) {
     return null;
   }
 
   transcriptionSessions.delete(sessionKey);
-  return session;
-};
+  clearTranscriptWaiters(session);
 
-const rejectPendingTranscriptionRequests = message => {
-  transcriptionPendingRequests.forEach(({ reject, timeout }) => {
-    clearTimeout(timeout);
-    reject(new Error(message));
-  });
-  transcriptionPendingRequests.clear();
-};
-
-const cleanupTranscriptionWorker = message => {
-  if (transcriptionWorkerReadline) {
-    transcriptionWorkerReadline.removeAllListeners();
-    transcriptionWorkerReadline.close();
-    transcriptionWorkerReadline = null;
+  if (session.openReject) {
+    session.openReject(new Error("Deepgram transcription session was closed."));
+    session.openReject = null;
+    session.openResolve = null;
   }
 
-  transcriptionWorker = null;
-  rejectPendingTranscriptionRequests(
-    message || "Python transcription worker is not running.",
-  );
-};
-
-const ensureTranscriptionWorker = () => {
-  if (transcriptionWorker && !transcriptionWorker.killed) {
-    return transcriptionWorker;
-  }
-
-  if (!fs.existsSync(TRANSCRIPTION_WORKER_PATH)) {
-    throw new Error(
-      `Python transcription worker was not found at ${TRANSCRIPTION_WORKER_PATH}`,
-    );
-  }
-
-  transcriptionWorker = spawn(
-    TRANSCRIPTION_PYTHON_BIN,
-    ["-u", TRANSCRIPTION_WORKER_PATH],
-    {
-      cwd: __dirname,
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  );
-
-  transcriptionWorker.stdout.setEncoding("utf8");
-  transcriptionWorker.stderr.setEncoding("utf8");
-
-  transcriptionWorkerReadline = readline.createInterface({
-    input: transcriptionWorker.stdout,
-  });
-
-  transcriptionWorkerReadline.on("line", line => {
-    if (!line.trim()) {
-      return;
-    }
-
+  if (session.connection) {
     try {
-      const message = JSON.parse(line);
-      const pending = transcriptionPendingRequests.get(message.id);
-
-      if (!pending) {
-        return;
+      session.closing = true;
+      const finishResult = session.connection.finish?.();
+      if (finishResult && typeof finishResult.then === "function") {
+        void finishResult.catch(error => {
+          console.warn(
+            "[Transcription] Failed to finish Deepgram session:",
+            error?.message || error,
+          );
+        });
       }
-
-      clearTimeout(pending.timeout);
-      transcriptionPendingRequests.delete(message.id);
-
-      if (message.success === false) {
-        pending.reject(new Error(message.error || "Transcription worker error"));
-        return;
-      }
-
-      pending.resolve(message);
     } catch (error) {
       console.warn(
-        "[Transcription] Failed to parse worker response:",
-        line,
+        "[Transcription] Failed to finish Deepgram session:",
         error?.message || error,
       );
     }
-  });
+  }
 
-  transcriptionWorker.stderr.on("data", chunk => {
-    const message = chunk.toString().trim();
-    if (message) {
-      console.warn("[TranscriptionWorker]", message);
-    }
-  });
-
-  transcriptionWorker.on("error", error => {
-    cleanupTranscriptionWorker(
-      error?.message || "Python transcription worker failed to start.",
-    );
-  });
-
-  transcriptionWorker.on("exit", code => {
-    cleanupTranscriptionWorker(
-      `Python transcription worker exited with code ${code ?? "unknown"}.`,
-    );
-  });
-
-  return transcriptionWorker;
+  return session;
 };
 
-const sendTranscriptionWorkerRequest = (action, payload = {}) =>
+const destroyTranscriptionSession = removeTranscriptionSession;
+
+const createDeepgramConnection = async sessionKey => {
+  const deepgram = getDeepgramClient();
+  const connection = deepgram.listen.live({
+    model: DEEPGRAM_MODEL,
+    language: DEEPGRAM_LANGUAGE,
+    smart_format: DEEPGRAM_SMART_FORMAT,
+    punctuate: DEEPGRAM_PUNCTUATE,
+    interim_results: DEEPGRAM_INTERIM_RESULTS,
+    vad_events: DEEPGRAM_VAD_EVENTS,
+    endpointing: DEEPGRAM_ENDPOINTING,
+    utterance_end_ms: DEEPGRAM_UTTERANCE_END_MS,
+    encoding: "linear16",
+    sample_rate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
+    channels: DEEPGRAM_CHANNELS,
+  });
+
+  connection.on(LiveTranscriptionEvents.Open, () => {
+    const session = transcriptionSessions.get(sessionKey);
+    if (session) {
+      session.isOpen = true;
+      if (session.openResolve) {
+        session.openResolve();
+        session.openResolve = null;
+        session.openReject = null;
+      }
+    }
+  });
+
+  connection.on(LiveTranscriptionEvents.Transcript, message => {
+    if (!message) {
+      return;
+    }
+
+    const session = transcriptionSessions.get(sessionKey);
+    if (!session) {
+      return;
+    }
+
+    const text = String(
+      message.channel?.alternatives?.[0]?.transcript ||
+        message.alternatives?.[0]?.transcript ||
+        "",
+    ).trim();
+    const isFinal = !!message.is_final || !!message.speech_final;
+
+    if (!text) {
+      return;
+    }
+
+    const changed =
+      text !== session.lastTranscript || isFinal !== session.lastIsFinal;
+    session.lastTranscript = text;
+    session.lastIsFinal = isFinal;
+    session.updatedAt = Date.now();
+
+    if (changed) {
+      session.revision += 1;
+      const payload = {
+        text,
+        isFinal,
+        revision: session.revision,
+      };
+      resolveTranscriptWaiters(session, payload);
+    }
+  });
+
+  connection.on(LiveTranscriptionEvents.Error, error => {
+    const session = transcriptionSessions.get(sessionKey);
+    if (!session) {
+      return;
+    }
+
+    session.lastError = error?.message || String(error);
+    if (session.openReject) {
+      session.openReject(new Error(session.lastError));
+      session.openReject = null;
+      session.openResolve = null;
+    }
+    rejectTranscriptWaiters(
+      session,
+      new Error(session.lastError || "Deepgram transcription connection error."),
+    );
+  });
+
+  connection.on(LiveTranscriptionEvents.Close, () => {
+    const session = transcriptionSessions.get(sessionKey);
+    if (!session) {
+      return;
+    }
+
+    session.closed = true;
+    if (!session.closing) {
+      if (session.openReject) {
+        session.openReject(
+          new Error("Deepgram transcription connection closed unexpectedly."),
+        );
+        session.openReject = null;
+        session.openResolve = null;
+      }
+      rejectTranscriptWaiters(
+        session,
+        new Error("Deepgram transcription connection closed unexpectedly."),
+      );
+      transcriptionSessions.delete(sessionKey);
+    }
+  });
+
+  return connection;
+};
+
+const waitForDeepgramOpen = session =>
   new Promise((resolve, reject) => {
-    let worker;
-
-    try {
-      worker = ensureTranscriptionWorker();
-    } catch (error) {
-      reject(error);
+    if (session.isOpen) {
+      resolve();
       return;
     }
 
-    if (!worker.stdin || worker.stdin.destroyed || !worker.stdin.writable) {
-      reject(new Error("Python transcription worker is not writable."));
-      return;
-    }
-
-    const id = `tx-${Date.now()}-${transcriptionWorkerRequestCounter += 1}`;
     const timeout = setTimeout(() => {
-      transcriptionPendingRequests.delete(id);
-      reject(new Error("Python transcription worker request timed out."));
-    }, 30000);
+      session.openReject = null;
+      session.openResolve = null;
+      reject(new Error("Deepgram transcription connection timed out while opening."));
+    }, 15000);
 
-    transcriptionPendingRequests.set(id, {
+    session.openResolve = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+
+    session.openReject = error => {
+      clearTimeout(timeout);
+      reject(error);
+    };
+  });
+
+const waitForTranscriptUpdate = (session, revision) =>
+  new Promise(resolve => {
+    if (session.revision > revision) {
+      resolve({
+        text: session.lastTranscript,
+        isFinal: session.lastIsFinal,
+        revision: session.revision,
+      });
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      session.pendingResolvers = session.pendingResolvers.filter(
+        entry => entry.timeout !== timeout,
+      );
+      resolve(null);
+    }, TRANSCRIPTION_RESULT_WAIT_MS);
+
+    session.pendingResolvers.push({
+      revision,
       resolve,
-      reject,
       timeout,
     });
-
-    worker.stdin.write(
-      `${JSON.stringify({
-        id,
-        action,
-        ...payload,
-      })}\n`,
-      error => {
-        if (!error) {
-          return;
-        }
-
-        clearTimeout(timeout);
-        transcriptionPendingRequests.delete(id);
-        reject(error);
-      },
-    );
   });
 
-const getTranscriptionAvailability = async () => {
-  if (!fs.existsSync(TRANSCRIPTION_MODEL_PATH)) {
-    return {
-      available: false,
-      reason: `Offline transcription model was not found at ${TRANSCRIPTION_MODEL_PATH}`,
-    };
-  }
+const createTranscriptResponse = session => {
+  const text = String(session.lastTranscript || "").trim();
+  const shouldDeliver =
+    text &&
+    (text !== session.lastDeliveredTranscript ||
+      session.lastIsFinal !== session.lastDeliveredIsFinal);
 
-  try {
-    const response = await sendTranscriptionWorkerRequest("status", {
-      modelPath: TRANSCRIPTION_MODEL_PATH,
-      outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
-    });
-
-    return {
-      available: !!response.available,
-      reason: response.reason || null,
-    };
-  } catch (error) {
-    return {
-      available: false,
-      reason:
-        error instanceof Error
-          ? error.message
-          : "Python transcription worker is unavailable.",
-    };
-  }
-};
-
-const destroyTranscriptionSession = sessionKey => {
-  const session = clearTranscriptionSession(sessionKey);
-  if (!session) {
+  if (!shouldDeliver) {
     return null;
   }
 
-  sendTranscriptionWorkerRequest("stop", { sessionId: sessionKey }).catch(error => {
-    console.warn(
-      "[Transcription] Failed to stop Python transcription session:",
-      error?.message || error,
-    );
-  });
+  session.lastDeliveredTranscript = text;
+  session.lastDeliveredIsFinal = session.lastIsFinal;
 
-  return session;
+  return {
+    text,
+    isFinal: session.lastIsFinal,
+  };
+};
+
+const getTranscriptionAvailability = () => {
+  if (!DEEPGRAM_API_KEY) {
+    return {
+      available: false,
+      reason:
+        "Missing DEEPGRAM_API_KEY. Create one in Deepgram and set it in backend environment variables.",
+    };
+  }
+
+  return { available: true };
 };
 
 const ensureTranscriptionSession = async (roomName, participantId) => {
   const sessionKey = getTranscriptionSessionKey(roomName, participantId);
+  const existingSession = transcriptionSessions.get(sessionKey);
 
-  clearTranscriptionSession(sessionKey);
-  await sendTranscriptionWorkerRequest("start", {
-    sessionId: sessionKey,
-    modelPath: TRANSCRIPTION_MODEL_PATH,
-    outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
-  });
+  if (existingSession?.connection) {
+    try {
+      existingSession.closing = true;
+      existingSession.connection.finish?.();
+    } catch {
+      // Best effort.
+    }
+  }
 
-  transcriptionSessions.set(sessionKey, {
+  transcriptionSessions.delete(sessionKey);
+
+  const session = {
     roomName,
     participantId,
+    connection: null,
     updatedAt: Date.now(),
-  });
+    revision: 0,
+    lastTranscript: "",
+    lastIsFinal: false,
+    lastDeliveredTranscript: "",
+    lastDeliveredIsFinal: false,
+    lastError: null,
+    closed: false,
+    closing: false,
+    isOpen: false,
+    openResolve: null,
+    openReject: null,
+    pendingResolvers: [],
+  };
+
+  transcriptionSessions.set(sessionKey, session);
+
+  const connection = await createDeepgramConnection(sessionKey);
+  session.connection = connection;
+  await waitForDeepgramOpen(session);
 
   return sessionKey;
 };
@@ -1092,10 +1193,10 @@ app.get("/transcription/status", async (req, res) => {
   return res.json({
     available: availability.available,
     reason: availability.reason || null,
-    inputSampleRate: TRANSCRIPTION_INPUT_SAMPLE_RATE,
     outputSampleRate: TRANSCRIPTION_OUTPUT_SAMPLE_RATE,
-    modelPath: TRANSCRIPTION_MODEL_PATH,
-    pythonBin: TRANSCRIPTION_PYTHON_BIN,
+    provider: "deepgram",
+    model: DEEPGRAM_MODEL,
+    language: DEEPGRAM_LANGUAGE,
   });
 });
 
@@ -1187,15 +1288,15 @@ app.post("/transcription/chunk", async (req, res) => {
       });
     }
 
-    const workerResponse = await sendTranscriptionWorkerRequest("chunk", {
-      sessionId,
-      audioBase64: normalizedAudioBuffer.toString("base64"),
-    });
-    const text = String(workerResponse.text || "").trim();
+    session.connection.send(normalizedAudioBuffer);
+
+    const previousRevision = session.revision;
+    const update = await waitForTranscriptUpdate(session, previousRevision);
+    const transcriptResponse = createTranscriptResponse(session) || update;
 
     return res.json({
-      text,
-      isFinal: !!workerResponse.isFinal,
+      text: transcriptResponse?.text || "",
+      isFinal: !!transcriptResponse?.isFinal,
     });
   } catch (error) {
     console.error("Error processing transcription chunk:", error);
@@ -1220,7 +1321,7 @@ app.post("/transcription/stop", async (req, res) => {
       });
     }
 
-    const session = clearTranscriptionSession(sessionId);
+    const session = removeTranscriptionSession(sessionId);
     if (!session) {
       return res.json({
         success: true,
@@ -1228,18 +1329,7 @@ app.post("/transcription/stop", async (req, res) => {
       });
     }
 
-    let text = "";
-    try {
-      const workerResponse = await sendTranscriptionWorkerRequest("stop", {
-        sessionId,
-      });
-      text = String(workerResponse.text || "").trim();
-    } catch (error) {
-      console.warn(
-        "[Transcription] Failed to finalize Python transcription session:",
-        error?.message || error,
-      );
-    }
+    const text = String(session.lastTranscript || "").trim();
 
     return res.json({
       success: true,
@@ -1268,20 +1358,19 @@ app.get("/rooms", (req, res) => {
   return res.json({ rooms: roomList });
 });
 
-const shutdownTranscriptionWorker = () => {
-  if (transcriptionWorker && !transcriptionWorker.killed) {
-    transcriptionWorker.kill();
-  }
-  cleanupTranscriptionWorker("Python transcription worker was stopped.");
+const shutdownTranscriptionSessions = () => {
+  Array.from(transcriptionSessions.keys()).forEach(sessionKey => {
+    removeTranscriptionSession(sessionKey);
+  });
 };
 
-process.on("exit", shutdownTranscriptionWorker);
+process.on("exit", shutdownTranscriptionSessions);
 process.on("SIGINT", () => {
-  shutdownTranscriptionWorker();
+  shutdownTranscriptionSessions();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  shutdownTranscriptionWorker();
+  shutdownTranscriptionSessions();
   process.exit(0);
 });
 

@@ -59,7 +59,7 @@ const PREVIEW_RATIO = 16 / 9;
 const ROOM_PARTICIPANTS_POLL_INTERVAL = 2000;
 const TRANSCRIPT_ENTRY_TTL_MS = 6000;
 const MAX_TRANSCRIPT_ENTRIES = 4;
-const TRANSCRIPTION_CHUNK_INTERVAL_MS = 2500;
+const TRANSCRIPTION_CHUNK_INTERVAL_MS = 1000;
 const PipModule = NativeModules.PipModule as
   | {
       setInCallPipEnabled?: (enabled: boolean) => void;
