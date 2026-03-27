@@ -93,21 +93,6 @@ interface TranscriptStatus {
   message: string;
 }
 
-interface TranscriptDataMessage {
-  type: 'transcript';
-  participantId: string;
-  participantName: string;
-  text: string;
-  isFinal?: boolean;
-  clear?: boolean;
-}
-
-interface TranscriptControlMessage {
-  type: 'transcription-control';
-  action: 'start' | 'stop';
-  requestedBy: string;
-}
-
 interface TranscriptAudioChunkMetadata {
   bitsPerSample?: number;
   sampleRate?: number;
@@ -178,19 +163,6 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const suppressAutoPipUntilRef = useRef(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const transcriptionActiveRef = useRef(false);
-  const transcriptMessageHandlerRef = useRef<
-    (message: TranscriptDataMessage) => void
-  >(() => {});
-  const transcriptionControlHandlerRef = useRef<
-    (message: TranscriptControlMessage) => void
-  >(() => {});
-  const publishTranscriptMessageRef = useRef<
-    (message: TranscriptDataMessage) => Promise<void>
-  >(async () => {});
-  const transcriptionLocalMetaRef = useRef({
-    participantId: localParticipantId,
-    participantName: localParticipantName || localParticipantId,
-  });
   const transcriptionSessionIdRef = useRef<string | null>(null);
   const transcriptionRecorderRef = useRef<any>(null);
   const transcriptionChunkIntervalRef = useRef<ReturnType<
@@ -422,26 +394,13 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     const onDataReceived = (payload: Uint8Array, participant: any) => {
       try {
         const str = Buffer.from(payload).toString('utf8');
-        const data = JSON.parse(str) as
-          | { type?: 'emoji'; emoji?: string }
-          | TranscriptDataMessage
-          | TranscriptControlMessage;
-        if (data.type === 'emoji' && typeof data.emoji === 'string') {
-          triggerEmojiBurst(data.emoji);
-          return;
+          const data = JSON.parse(str) as { type?: 'emoji'; emoji?: string };
+          if (data.type === 'emoji' && typeof data.emoji === 'string') {
+            triggerEmojiBurst(data.emoji);
+          }
+        } catch (err) {
+          console.warn('Failed to parse received data message:', err);
         }
-
-        if (data.type === 'transcript') {
-          transcriptMessageHandlerRef.current(data);
-          return;
-        }
-
-        if (data.type === 'transcription-control') {
-          transcriptionControlHandlerRef.current(data);
-        }
-      } catch (err) {
-        console.warn('Failed to parse received data message:', err);
-      }
     };
     room.on(RoomEvent.DataReceived, onDataReceived);
 
@@ -473,25 +432,14 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const localDisplayName =
     room.localParticipant?.name || localParticipantName || localIdentity;
 
-  useEffect(() => {
-    transcriptionLocalMetaRef.current = {
-      participantId: localIdentity,
-      participantName: localDisplayName,
-    };
-  }, [localDisplayName, localIdentity]);
-
   const handleIncomingTranscriptMessage = useCallback(
-    (message: TranscriptDataMessage) => {
+    (message: { text: string; isFinal?: boolean; clear?: boolean }) => {
       if (!enableTranscription || !transcriptionActiveRef.current) {
         return;
       }
 
       if (message.clear) {
-        setTranscriptEntries(currentEntries =>
-          currentEntries.filter(
-            entry => entry.participantId !== message.participantId,
-          ),
-        );
+        setTranscriptEntries([]);
         return;
       }
 
@@ -505,77 +453,16 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         message: 'Listening for speech...',
       });
 
-      setTranscriptEntries(currentEntries => {
-        const nextEntries = currentEntries.filter(
-          entry => entry.participantId !== message.participantId,
-        );
-
-        nextEntries.unshift({
-          participantId: message.participantId,
-          participantName: message.participantName,
+      setTranscriptEntries([
+        {
+          participantId: localIdentity,
+          participantName: localDisplayName,
           text: nextText,
           updatedAt: Date.now(),
-        });
-
-        return nextEntries
-          .sort((left, right) => right.updatedAt - left.updatedAt)
-          .slice(0, MAX_TRANSCRIPT_ENTRIES);
-      });
+        },
+      ]);
     },
-    [enableTranscription],
-  );
-
-  useEffect(() => {
-    transcriptMessageHandlerRef.current = handleIncomingTranscriptMessage;
-  }, [handleIncomingTranscriptMessage]);
-
-  const publishTranscriptMessage = useCallback(
-    async (message: TranscriptDataMessage) => {
-      if (!enableTranscription) {
-        return;
-      }
-
-      try {
-        const payload = Uint8Array.from(
-          Buffer.from(JSON.stringify(message), 'utf8'),
-        );
-        await room.localParticipant.publishData(payload, {
-          reliable: !!message.isFinal || !!message.clear,
-        });
-      } catch (error) {
-        console.warn('[Transcription] Failed to publish transcript:', error);
-      }
-    },
-    [enableTranscription, room],
-  );
-
-  useEffect(() => {
-    publishTranscriptMessageRef.current = publishTranscriptMessage;
-  }, [publishTranscriptMessage]);
-
-  const publishTranscriptionControl = useCallback(
-    async (action: 'start' | 'stop') => {
-      if (!enableTranscription) {
-        return;
-      }
-
-      try {
-        const payload = Uint8Array.from(
-          Buffer.from(
-            JSON.stringify({
-              type: 'transcription-control',
-              action,
-              requestedBy: localIdentity,
-            } satisfies TranscriptControlMessage),
-            'utf8',
-          ),
-        );
-        await room.localParticipant.publishData(payload, { reliable: true });
-      } catch (error) {
-        console.warn('[Transcription] Failed to publish control message:', error);
-      }
-    },
-    [enableTranscription, localIdentity, room],
+    [enableTranscription, localDisplayName, localIdentity],
   );
 
   const processQueuedTranscriptionChunks = useCallback(async () => {
@@ -634,19 +521,10 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
           message: 'Transcribing live...',
         });
 
-        const { participantId, participantName } =
-          transcriptionLocalMetaRef.current;
-
-        const transcriptMessage: TranscriptDataMessage = {
-          type: 'transcript',
-          participantId,
-          participantName,
+        handleIncomingTranscriptMessage({
           text,
           isFinal: !!data.isFinal,
-        };
-
-        handleIncomingTranscriptMessage(transcriptMessage);
-        await publishTranscriptMessageRef.current(transcriptMessage);
+        });
       }
     } catch (error) {
       console.warn('[Transcription] Failed while processing chunks:', error);
@@ -798,7 +676,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   );
 
   const stopLocalTranscription = useCallback(
-    async (notifyRoom: boolean) => {
+    async () => {
       transcriptionActiveRef.current = false;
 
       if (transcriptionChunkIntervalRef.current) {
@@ -843,44 +721,9 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         tone: 'idle',
         message: '',
       });
-
-      if (notifyRoom) {
-        await publishTranscriptMessage({
-          type: 'transcript',
-          participantId: localIdentity,
-          participantName: localDisplayName,
-          text: '',
-          isFinal: true,
-          clear: true,
-        });
-      }
     },
-    [localDisplayName, localIdentity, publishTranscriptMessage],
+    [],
   );
-
-  const handleIncomingTranscriptionControl = useCallback(
-    (message: TranscriptControlMessage) => {
-      if (!enableTranscription) {
-        return;
-      }
-
-      if (message.action === 'start') {
-        if (!transcriptionActiveRef.current) {
-          void startLocalTranscription(false);
-        }
-        return;
-      }
-
-      if (message.action === 'stop') {
-        void stopLocalTranscription(false);
-      }
-    },
-    [enableTranscription, startLocalTranscription, stopLocalTranscription],
-  );
-
-  useEffect(() => {
-    transcriptionControlHandlerRef.current = handleIncomingTranscriptionControl;
-  }, [handleIncomingTranscriptionControl]);
 
   useEffect(() => {
     transcriptionActiveRef.current = isTranscribing;
@@ -1133,19 +976,14 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     }
 
     if (isTranscribing) {
-      await publishTranscriptionControl('stop');
-      await stopLocalTranscription(true);
+      await stopLocalTranscription();
       return;
     }
 
-    const started = await startLocalTranscription(true);
-    if (started) {
-      await publishTranscriptionControl('start');
-    }
+    await startLocalTranscription(true);
   }, [
     enableTranscription,
     isTranscribing,
-    publishTranscriptionControl,
     startLocalTranscription,
     stopLocalTranscription,
   ]);
@@ -1267,7 +1105,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       console.log(`========================\n`);
 
       if (enableTranscription && transcriptionActiveRef.current) {
-        await stopLocalTranscription(true);
+        await stopLocalTranscription();
       }
 
       try {
