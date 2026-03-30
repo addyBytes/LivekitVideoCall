@@ -29,6 +29,8 @@ export interface ParticipantInfo {
   isLocal: boolean;
   canPin?: boolean;
   isPinned?: boolean;
+  canSpotlight?: boolean;
+  isSpotlighted?: boolean;
 }
 
 /**
@@ -84,6 +86,7 @@ export interface ParticipantListProps {
   visible: boolean;
   onClose: () => void;
   onPinParticipant?: (participantId: string) => void;
+  onSpotlightParticipant?: (participantId: string) => void;
 }
 
 /**

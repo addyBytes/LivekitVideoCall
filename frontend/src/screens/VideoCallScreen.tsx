@@ -19,10 +19,12 @@ import {
   Easing,
   StatusBar,
   TouchableOpacity,
+  ScrollView,
   AppState,
   AppStateStatus,
   Alert,
   NativeModules,
+  NativeEventEmitter,
   Platform,
   useWindowDimensions,
 } from 'react-native';
@@ -58,13 +60,19 @@ import type {
 const PREVIEW_RATIO = 16 / 9;
 const ROOM_PARTICIPANTS_POLL_INTERVAL = 2000;
 const TRANSCRIPT_ENTRY_TTL_MS = 6000;
-const MAX_TRANSCRIPT_ENTRIES = 4;
-const TRANSCRIPTION_CHUNK_INTERVAL_MS = 1000;
+const MAX_GRID_PARTICIPANTS_PER_PAGE = 6;
 const PipModule = NativeModules.PipModule as
   | {
       setInCallPipEnabled?: (enabled: boolean) => void;
       enterPictureInPicture?: () => void;
       supportsPip?: () => Promise<boolean>;
+    }
+  | undefined;
+const TranscriptionModule = NativeModules.TranscriptionModule as
+  | {
+      start?: (localeTag?: string | null) => Promise<void>;
+      stop?: () => Promise<void>;
+      isAvailable?: () => Promise<boolean>;
     }
   | undefined;
 
@@ -91,18 +99,6 @@ interface TranscriptEntry {
 interface TranscriptStatus {
   tone: 'idle' | 'listening' | 'error';
   message: string;
-}
-
-interface TranscriptAudioChunkMetadata {
-  bitsPerSample?: number;
-  sampleRate?: number;
-  numberOfChannels?: number;
-  numberOfFrames?: number;
-}
-
-interface TranscriptAudioChunk {
-  audioBase64: string;
-  metadata?: TranscriptAudioChunkMetadata;
 }
 
 // ============================================================
@@ -149,6 +145,9 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const [isLocalMain, setIsLocalMain] = useState(false);
   const [selectedRemoteId, setSelectedRemoteId] = useState<string | null>(null);
   const [pinnedParticipantId, setPinnedParticipantId] = useState<string | null>(null);
+  const [spotlightedParticipantIds, setSpotlightedParticipantIds] = useState<string[]>(
+    [],
+  );
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [transcriptStatus, setTranscriptStatus] = useState<TranscriptStatus>({
@@ -168,17 +167,18 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const transcriptionChunkIntervalRef = useRef<ReturnType<
     typeof setInterval
   > | null>(null);
-  const transcriptionChunkQueueRef = useRef<TranscriptAudioChunk[]>([]);
+  const transcriptionChunkQueueRef = useRef<any[]>([]);
   const transcriptionChunkProcessingRef = useRef(false);
 
   const visibleParticipants = useMemo(
-    () =>
-      participants.filter(
+    () => {
+      return participants.filter(
         participant =>
           !hiddenParticipantIds.includes(participant.identity) &&
           (activeRoomParticipantIds == null ||
             activeRoomParticipantIds.includes(participant.identity)),
-      ),
+      );
+    },
     [activeRoomParticipantIds, hiddenParticipantIds, participants],
   );
 
@@ -453,17 +453,111 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         message: 'Listening for speech...',
       });
 
-      setTranscriptEntries([
-        {
-          participantId: localIdentity,
-          participantName: localDisplayName,
-          text: nextText,
-          updatedAt: Date.now(),
-        },
-      ]);
+      setTranscriptEntries(currentEntries => {
+        const previousText = currentEntries[0]?.text || '';
+        const combinedText =
+          message.isFinal && previousText
+            ? `${previousText} ${nextText}`.trim()
+            : nextText;
+
+        return [
+          {
+            participantId: localIdentity,
+            participantName: localDisplayName,
+            text: combinedText,
+            updatedAt: Date.now(),
+          },
+        ];
+      });
     },
     [enableTranscription, localDisplayName, localIdentity],
   );
+
+  useEffect(() => {
+    if (!enableTranscription || Platform.OS !== 'android' || !TranscriptionModule) {
+      return;
+    }
+
+    const emitter = new NativeEventEmitter(TranscriptionModule as never);
+    const resultSub = emitter.addListener('onTranscriptionResult', (event: any) => {
+      const text = String(event?.text || '').trim();
+      if (!text) {
+        return;
+      }
+
+      handleIncomingTranscriptMessage({
+        text,
+        isFinal: !!event?.isFinal,
+      });
+    });
+
+    const errorSub = emitter.addListener('onTranscriptionError', (event: any) => {
+      const message =
+        String(event?.message || '').trim() || 'Transcription error.';
+
+      if (
+        message === 'Listening for speech...' ||
+        message === 'Speech detected...' ||
+        message === 'Processing speech...' ||
+        message === 'Recognizer is busy. Retrying...' ||
+        message === 'Listening for speech...'
+      ) {
+        setTranscriptStatus({
+          tone: 'listening',
+          message,
+        });
+        return;
+      }
+
+      if (message === 'Transcription stopped.') {
+        setIsTranscribing(false);
+        setTranscriptStatus({
+          tone: 'idle',
+          message: '',
+        });
+        return;
+      }
+
+      setTranscriptStatus({
+        tone: 'error',
+        message,
+      });
+    });
+
+    const stateSub = emitter.addListener(
+      'onTranscriptionStateChanged',
+      (event: any) => {
+        const active = !!event?.active;
+        transcriptionActiveRef.current = active;
+
+        if (!active) {
+          setIsTranscribing(false);
+          setTranscriptEntries([]);
+          setTranscriptStatus({
+            tone: 'idle',
+            message: '',
+          });
+          return;
+        }
+
+        setIsTranscribing(true);
+        setTranscriptStatus(currentStatus =>
+          currentStatus.message
+            ? currentStatus
+            : {
+                tone: 'listening',
+                message: 'Listening for speech...',
+              },
+        );
+      },
+    );
+
+    return () => {
+      resultSub.remove();
+      errorSub.remove();
+      stateSub.remove();
+    };
+  }, [enableTranscription, handleIncomingTranscriptMessage]);
 
   const processQueuedTranscriptionChunks = useCallback(async () => {
     if (
@@ -543,93 +637,21 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         return true;
       }
 
-      const microphonePublication = room.localParticipant.getTrackPublication(
-        Track.Source.Microphone,
-      );
-      const localAudioTrack = microphonePublication?.audioTrack;
-      const mediaStream = localAudioTrack?.mediaStream;
-
-      if (!mediaStream) {
+      if (Platform.OS !== 'android' || !TranscriptionModule?.start) {
         setTranscriptStatus({
           tone: 'error',
-          message: 'Microphone audio is not available for transcription.',
+          message: 'Speech transcription is only available on Android.',
         });
         if (showAlertOnFailure) {
           Alert.alert(
             'Transcription Failed',
-            'Microphone audio is not available for transcription.',
-          );
-        }
-        return false;
-      }
-
-      const RecorderCtor = (globalThis as typeof globalThis & {
-        MediaRecorder?: new (stream: MediaStream) => {
-          addEventListener: (
-            eventName: 'dataavailable',
-            listener: (event: any) => void,
-          ) => void;
-          start: () => void;
-          stop?: () => void;
-          requestData?: () => void;
-        };
-      }).MediaRecorder;
-      if (!RecorderCtor) {
-        setTranscriptStatus({
-          tone: 'error',
-          message: 'Audio recorder is not available on this device.',
-        });
-        if (showAlertOnFailure) {
-          Alert.alert(
-            'Transcription Failed',
-            'Audio recorder is not available on this device.',
+            'Speech transcription is only available on Android.',
           );
         }
         return false;
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/transcription/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomName,
-            participantId: localIdentity,
-          }),
-        });
-        const data: { sessionId?: string; error?: string } = await response.json();
-
-        if (!response.ok || !data.sessionId) {
-          throw new Error(
-            data.error || 'Meeting transcription backend could not start.',
-          );
-        }
-
-        const recorder = new RecorderCtor(mediaStream);
-        recorder.addEventListener('dataavailable', (event: any) => {
-          const byteArray = event?.data?.byteArray as Uint8Array | undefined;
-          const metadata = event?.data?.metadata as
-            | TranscriptAudioChunkMetadata
-            | undefined;
-
-          if (
-            !byteArray ||
-            byteArray.length === 0 ||
-            !transcriptionActiveRef.current
-          ) {
-            return;
-          }
-
-          transcriptionChunkQueueRef.current.push({
-            audioBase64: Buffer.from(byteArray).toString('base64'),
-            metadata,
-          });
-          void processQueuedTranscriptionChunks();
-        });
-
-        transcriptionSessionIdRef.current = data.sessionId;
-        transcriptionRecorderRef.current = recorder;
-        transcriptionChunkQueueRef.current = [];
         transcriptionActiveRef.current = true;
         setTranscriptEntries([]);
         setTranscriptStatus({
@@ -638,14 +660,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
         });
         setIsTranscribing(true);
 
-        recorder.start();
-        transcriptionChunkIntervalRef.current = setInterval(() => {
-          try {
-            transcriptionRecorderRef.current?.requestData?.();
-          } catch (error) {
-            console.warn('[Transcription] Failed to request recorder data:', error);
-          }
-        }, TRANSCRIPTION_CHUNK_INTERVAL_MS);
+        await TranscriptionModule.start(undefined);
 
         return true;
       } catch (error) {
@@ -657,7 +672,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
           message:
             error instanceof Error
               ? error.message
-              : 'Could not start meeting transcription.',
+              : 'Could not start speech transcription.',
         });
 
         if (showAlertOnFailure) {
@@ -665,54 +680,24 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
             'Transcription Failed',
             error instanceof Error
               ? error.message
-              : 'Could not start meeting transcription.',
+              : 'Could not start speech transcription.',
           );
         }
 
         return false;
       }
     },
-    [enableTranscription, localIdentity, room, roomName, processQueuedTranscriptionChunks],
+    [enableTranscription],
   );
 
   const stopLocalTranscription = useCallback(
     async () => {
       transcriptionActiveRef.current = false;
 
-      if (transcriptionChunkIntervalRef.current) {
-        clearInterval(transcriptionChunkIntervalRef.current);
-        transcriptionChunkIntervalRef.current = null;
-      }
-
       try {
-        transcriptionRecorderRef.current?.requestData?.();
-      } catch {
-        // Best effort flush before stop.
-      }
-
-      try {
-        transcriptionRecorderRef.current?.stop?.();
-      } catch {
-        // Ignore recorder stop failures.
-      }
-
-      transcriptionRecorderRef.current = null;
-      transcriptionChunkQueueRef.current = [];
-      transcriptionChunkProcessingRef.current = false;
-
-      const sessionId = transcriptionSessionIdRef.current;
-      transcriptionSessionIdRef.current = null;
-
-      if (sessionId) {
-        try {
-          await fetch(`${API_BASE_URL}/transcription/stop`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId }),
-          });
-        } catch (error) {
-          console.warn('[Transcription] Failed to stop backend session:', error);
-        }
+        await TranscriptionModule?.stop?.();
+      } catch (error) {
+        console.warn('[Transcription] Failed to stop native transcription:', error);
       }
 
       setIsTranscribing(false);
@@ -795,6 +780,26 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     }
   }, [visibleParticipants, pinnedParticipantId]);
 
+  useEffect(() => {
+    const visibleIds = new Set(visibleParticipants.map(participant => participant.identity));
+    setSpotlightedParticipantIds(currentIds =>
+      {
+        const nextIds = currentIds
+          .filter(participantId => visibleIds.has(participantId))
+          .slice(0, MAX_GRID_PARTICIPANTS_PER_PAGE);
+
+        if (
+          nextIds.length === currentIds.length &&
+          nextIds.every((participantId, index) => participantId === currentIds[index])
+        ) {
+          return currentIds;
+        }
+
+        return nextIds;
+      },
+    );
+  }, [visibleParticipants]);
+
   const localCameraTrackRef = useMemo(() => {
     const localTrack = tracks.find(
       item =>
@@ -860,8 +865,15 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
       isLocal: p.identity === localParticipantId,
       canPin: p.identity !== localParticipantId,
       isPinned: p.identity === pinnedParticipantId,
+      canSpotlight: visibleParticipants.length >= MAX_GRID_PARTICIPANTS_PER_PAGE,
+      isSpotlighted: spotlightedParticipantIds.includes(p.identity),
     }));
-  }, [visibleParticipants, localParticipantId, pinnedParticipantId]);
+  }, [
+    localParticipantId,
+    pinnedParticipantId,
+    spotlightedParticipantIds,
+    visibleParticipants,
+  ]);
 
   // Console log participant changes
   useEffect(() => {
@@ -888,6 +900,35 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     [pinnedParticipantId, visibleParticipants],
   );
 
+  const orderedGridParticipants = useMemo(() => {
+    const spotlightedIds = new Set(spotlightedParticipantIds);
+    const spotlighted = spotlightedParticipantIds
+      .map(participantId =>
+        visibleParticipants.find(participant => participant.identity === participantId),
+      )
+      .filter((participant): participant is (typeof visibleParticipants)[number] => !!participant);
+    const remaining = visibleParticipants.filter(
+      participant => !spotlightedIds.has(participant.identity),
+    );
+
+    return [...spotlighted, ...remaining];
+  }, [spotlightedParticipantIds, visibleParticipants]);
+
+  const participantPages = useMemo(() => {
+    const pages: (typeof visibleParticipants)[] = [];
+
+    for (let index = 0; index < orderedGridParticipants.length; index += MAX_GRID_PARTICIPANTS_PER_PAGE) {
+      pages.push(
+        orderedGridParticipants.slice(
+          index,
+          index + MAX_GRID_PARTICIPANTS_PER_PAGE,
+        ) as typeof visibleParticipants,
+      );
+    }
+
+    return pages.length > 0 ? pages : [orderedGridParticipants as typeof visibleParticipants];
+  }, [orderedGridParticipants]);
+
   const localParticipant = room.localParticipant;
 
   const isPinnedMode = !!pinnedParticipant;
@@ -912,28 +953,36 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const stageHeight = screenHeight;
   const previewWidth = Math.max(105, Math.min(140, Math.floor(screenWidth * 0.32)));
   const previewHeight = Math.round(previewWidth * PREVIEW_RATIO);
-  const gridColumnCount = visibleParticipants.length >= 2 ? 2 : 1;
-  const gridRowCount = Math.max(
-    1,
-    Math.ceil(visibleParticipants.length / gridColumnCount),
-  );
   const gridGap = 8;
   const gridHorizontalPadding = 12;
   const gridVerticalPadding = 12;
   const controlsReservedHeight = 120;
-  const availableGridWidth =
-    screenWidth -
-    gridHorizontalPadding * 2 -
-    gridGap * (gridColumnCount - 1);
-  const availableGridHeight = Math.max(
-    220,
-    stageHeight -
-      controlsReservedHeight -
-      gridVerticalPadding * 2 -
-      gridGap * (gridRowCount - 1),
+
+  const getGridMetrics = useCallback(
+    (count: number) => {
+      const columnCount = count <= 1 ? 1 : 2;
+      const rowCount = count <= 2 ? 1 : count <= 4 ? 2 : 3;
+      const availableGridWidth =
+        screenWidth -
+        gridHorizontalPadding * 2 -
+        gridGap * (columnCount - 1);
+      const availableGridHeight = Math.max(
+        220,
+        stageHeight -
+          controlsReservedHeight -
+          gridVerticalPadding * 2 -
+          gridGap * (rowCount - 1),
+      );
+
+      return {
+        columnCount,
+        rowCount,
+        tileWidth: Math.floor(availableGridWidth / columnCount),
+        tileHeight: Math.floor(availableGridHeight / rowCount),
+      };
+    },
+    [screenWidth, stageHeight],
   );
-  const gridTileWidth = Math.floor(availableGridWidth / gridColumnCount);
-  const gridTileHeight = Math.floor(availableGridHeight / gridRowCount);
 
   const handleSwapMainPreview = useCallback(() => {
     if (!selectedRemoteParticipant) return;
@@ -990,6 +1039,21 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
 
   const handlePinParticipant = useCallback((participantIdentity: string) => {
     setPinnedParticipantId(participantIdentity);
+    setShowParticipants(false);
+  }, []);
+
+  const handleSpotlightParticipant = useCallback((participantIdentity: string) => {
+    setSpotlightedParticipantIds(currentIds => {
+      if (currentIds.includes(participantIdentity)) {
+        return currentIds.filter(id => id !== participantIdentity);
+      }
+
+      if (currentIds.length >= MAX_GRID_PARTICIPANTS_PER_PAGE) {
+        return currentIds;
+      }
+
+      return [...currentIds, participantIdentity];
+    });
     setShowParticipants(false);
   }, []);
 
@@ -1136,6 +1200,43 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     stopLocalTranscription,
   ]);
 
+  const renderGridPage = useCallback(
+    (pageParticipants: typeof visibleParticipants, pageIndex: number) => {
+      const metrics = getGridMetrics(pageParticipants.length);
+
+      return (
+        <View
+          key={`grid-page-${pageIndex}`}
+          style={[styles.gridPage, { width: screenWidth }]}
+        >
+          <View style={[styles.gridWrap, { minHeight: stageHeight }]}>
+            {pageParticipants.map(participant => (
+              <VideoTile
+                key={`grid-${pageIndex}-${participant.identity}-${trackUpdate}`}
+                trackRef={getTrackRefForParticipant(participant.identity)}
+                participantName={participant.name || participant.identity}
+                participantId={participant.identity}
+                isSpeaking={!!participant.isSpeaking}
+                isLocal={participant.identity === localIdentity}
+                isPreview={false}
+                tileWidth={metrics.tileWidth}
+                tileHeight={metrics.tileHeight}
+              />
+            ))}
+          </View>
+        </View>
+      );
+    },
+    [
+      getGridMetrics,
+      getTrackRefForParticipant,
+      localIdentity,
+      screenWidth,
+      stageHeight,
+      trackUpdate,
+    ],
+  );
+
   if (isPip || forceVideoOnly) {
     // Only show main video in PiP mode or when forceVideoOnly is set (no preview, no overlays, no ControlsBar)
     return (
@@ -1270,21 +1371,22 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
               ) : null}
             </View>
           ) : (
-            <View style={styles.gridWrap}>
-              {visibleParticipants.map(p => (
-                <VideoTile
-                  key={`grid-${p.identity}-${trackUpdate}`}
-                  trackRef={getTrackRefForParticipant(p.identity)}
-                  participantName={p.name || p.identity}
-                  participantId={p.identity}
-                  isSpeaking={!!p.isSpeaking}
-                  isLocal={p.identity === localIdentity}
-                  isPreview={false}
-                  tileWidth={gridTileWidth}
-                  tileHeight={gridTileHeight}
-                />
-              ))}
-            </View>
+            participantPages.length > 1 ? (
+              <ScrollView
+                style={styles.pagedGridScroll}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                bounces={false}
+                contentContainerStyle={styles.pagedGridContainer}
+              >
+                {participantPages.map((pageParticipants, pageIndex) =>
+                  renderGridPage(pageParticipants, pageIndex),
+                )}
+              </ScrollView>
+            ) : (
+              renderGridPage(participantPages[0] || [], 0)
+            )
           )
         ) : (
           <View style={styles.noVideoContainer}>
@@ -1360,6 +1462,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
             visible={showParticipants}
             onClose={() => setShowParticipants(false)}
             onPinParticipant={handlePinParticipant}
+            onSpotlightParticipant={handleSpotlightParticipant}
           />
         </>
       )}
@@ -1715,8 +1818,22 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    alignContent: 'flex-start',
+    justifyContent: 'center',
+    alignItems: 'center',
+    alignContent: 'center',
+    gap: 8,
+  },
+  pagedGridScroll: {
+    flex: 1,
+  },
+  pagedGridContainer: {
+    flexGrow: 1,
+    alignItems: 'stretch',
+  },
+  gridPage: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   page: {
     flex: 1,

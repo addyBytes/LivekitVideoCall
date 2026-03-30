@@ -20,6 +20,7 @@ const ParticipantList: React.FC<ParticipantListProps> = ({
   visible,
   onClose,
   onPinParticipant,
+  onSpotlightParticipant,
 }) => {
   const renderParticipant = ({item}: {item: ParticipantInfo}) => (
     <View style={styles.participantRow}>
@@ -48,21 +49,39 @@ const ParticipantList: React.FC<ParticipantListProps> = ({
         </Text>
       </View>
 
-      {item.canPin ? (
-        <TouchableOpacity
-          style={[
-            styles.pinButton,
-            item.isPinned && styles.pinButtonActive,
-          ]}
-          onPress={() => {
-            onPinParticipant?.(item.id);
-            onClose();
-          }}>
-          <Text style={styles.pinButtonText}>
-            {item.isPinned ? 'Pinned' : 'Pin'}
-          </Text>
-        </TouchableOpacity>
-      ) : null}
+      <View style={styles.actionColumn}>
+        {item.canPin ? (
+          <TouchableOpacity
+            style={[
+              styles.pinButton,
+              item.isPinned && styles.pinButtonActive,
+            ]}
+            onPress={() => {
+              onPinParticipant?.(item.id);
+              onClose();
+            }}>
+            <Text style={styles.pinButtonText}>
+              {item.isPinned ? 'Pinned' : 'Pin'}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {item.canSpotlight ? (
+          <TouchableOpacity
+            style={[
+              styles.spotlightButton,
+              item.isSpotlighted && styles.spotlightButtonActive,
+            ]}
+            onPress={() => {
+              onSpotlightParticipant?.(item.id);
+              onClose();
+            }}>
+            <Text style={styles.spotlightButtonText}>
+              {item.isSpotlighted ? 'Remove' : 'Spotlight'}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
     </View>
   );
 
@@ -178,6 +197,11 @@ const styles = StyleSheet.create({
   participantInfo: {
     flex: 1,
   },
+  actionColumn: {
+    gap: 8,
+    marginLeft: 12,
+    alignItems: 'flex-end',
+  },
   pinButton: {
     backgroundColor: 'rgba(99, 102, 241, 0.16)',
     borderWidth: 1,
@@ -192,6 +216,23 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(16, 185, 129, 0.4)',
   },
   pinButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  spotlightButton: {
+    backgroundColor: 'rgba(20, 184, 166, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(45, 212, 191, 0.3)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  spotlightButtonActive: {
+    backgroundColor: 'rgba(249, 115, 22, 0.2)',
+    borderColor: 'rgba(251, 146, 60, 0.4)',
+  },
+  spotlightButtonText: {
     color: '#ffffff',
     fontSize: 12,
     fontWeight: '700',
