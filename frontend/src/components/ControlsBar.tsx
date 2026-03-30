@@ -4,27 +4,7 @@
 // ============================================================
 
 import React, {useState} from 'react';
-import { Platform, NativeModules } from 'react-native';
-
-interface PipModeChangeEvent {
-  isPip?: boolean;
-}
-
-// PiP mode detection helper (must match VideoCallScreen)
-function usePipMode() {
-  const [isPip, setIsPip] = useState(false);
-  React.useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const handler = (event: PipModeChangeEvent) => {
-      if (event && typeof event.isPip === 'boolean') setIsPip(event.isPip);
-    };
-    const emitter = require('react-native').NativeEventEmitter;
-    const pipEmitter = new emitter(NativeModules.PipModule);
-    const sub = pipEmitter.addListener('onPictureInPictureModeChanged', handler);
-    return () => sub.remove();
-  }, []);
-  return isPip;
-}
+import { usePipMode } from '../hooks/usePipMode';
 import {View, Text, StyleSheet, TouchableOpacity} from 'react-native';
 import type {ControlsBarProps} from '../types';
 

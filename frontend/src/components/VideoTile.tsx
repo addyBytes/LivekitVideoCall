@@ -4,27 +4,7 @@
 // ============================================================
 
 import React from 'react';
-import { Platform, NativeModules } from 'react-native';
-
-interface PipModeChangeEvent {
-  isPip?: boolean;
-}
-
-// PiP mode detection helper (must match VideoCallScreen)
-function usePipMode() {
-  const [isPip, setIsPip] = React.useState(false);
-  React.useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const handler = (event: PipModeChangeEvent) => {
-      if (event && typeof event.isPip === 'boolean') setIsPip(event.isPip);
-    };
-    const emitter = require('react-native').NativeEventEmitter;
-    const pipEmitter = new emitter(NativeModules.PipModule);
-    const sub = pipEmitter.addListener('onPictureInPictureModeChanged', handler);
-    return () => sub.remove();
-  }, []);
-  return isPip;
-}
+import { usePipMode } from '../hooks/usePipMode';
 import { View, Text, StyleSheet } from 'react-native';
 import { VideoTrack } from '@livekit/react-native';
 import type { VideoTileProps } from '../types';
@@ -37,7 +17,7 @@ const getInitials = (name: string) =>
     .toUpperCase()
     .substring(0, 2);
 
-const VideoTile: React.FC<VideoTileProps & { trackUpdate?: number }> = ({
+const VideoTile: React.FC<VideoTileProps> = ({
   trackRef,
   participantName,
   participantId,

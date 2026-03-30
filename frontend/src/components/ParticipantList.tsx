@@ -22,67 +22,71 @@ const ParticipantList: React.FC<ParticipantListProps> = ({
   onPinParticipant,
   onSpotlightParticipant,
 }) => {
-  const renderParticipant = ({item}: {item: ParticipantInfo}) => (
-    <View style={styles.participantRow}>
-      {/* Avatar */}
-      <View style={styles.avatar}>
-        <Text style={styles.avatarText}>
-          {item.name.charAt(0).toUpperCase()}
-        </Text>
-      </View>
-
-      {/* Info */}
-      <View style={styles.participantInfo}>
-        <View style={styles.nameRow}>
-          <Text style={styles.participantName}>{item.name}</Text>
-          {item.isLocal && (
-            <View style={styles.youBadge}>
-              <Text style={styles.youBadgeText}>You</Text>
-            </View>
-          )}
+  const renderParticipant = React.useCallback(
+    ({item}: {item: ParticipantInfo}) => (
+      <View style={styles.participantRow}>
+        {/* Avatar */}
+        <View style={styles.avatar}>
+          <Text style={styles.avatarText}>
+            {item.name.charAt(0).toUpperCase()}
+          </Text>
         </View>
-        <Text style={styles.participantUuid}>
-          UUID: {item.id.substring(0, 8)}...
-        </Text>
-        <Text style={styles.participantJoined}>
-          Joined: {new Date(item.joinedAt).toLocaleTimeString()}
-        </Text>
-      </View>
 
-      <View style={styles.actionColumn}>
-        {item.canPin ? (
-          <TouchableOpacity
-            style={[
-              styles.pinButton,
-              item.isPinned && styles.pinButtonActive,
-            ]}
-            onPress={() => {
-              onPinParticipant?.(item.id);
-              onClose();
-            }}>
-            <Text style={styles.pinButtonText}>
-              {item.isPinned ? 'Pinned' : 'Pin'}
-            </Text>
-          </TouchableOpacity>
-        ) : null}
+        {/* Info */}
+        <View style={styles.participantInfo}>
+          <View style={styles.nameRow}>
+            <Text style={styles.participantName}>{item.name}</Text>
+            {item.isLocal && (
+              <View style={styles.youBadge}>
+                <Text style={styles.youBadgeText}>You</Text>
+              </View>
+            )}
+          </View>
+          <Text style={styles.participantUuid}>
+            UUID: {item.id.substring(0, 8)}...
+          </Text>
+          <Text style={styles.participantJoined}>
+            Joined: {new Date(item.joinedAt).toLocaleTimeString()}
+          </Text>
+        </View>
 
-        {item.canSpotlight ? (
-          <TouchableOpacity
-            style={[
-              styles.spotlightButton,
-              item.isSpotlighted && styles.spotlightButtonActive,
-            ]}
-            onPress={() => {
-              onSpotlightParticipant?.(item.id);
-              onClose();
-            }}>
-            <Text style={styles.spotlightButtonText}>
-              {item.isSpotlighted ? 'Remove' : 'Spotlight'}
-            </Text>
-          </TouchableOpacity>
-        ) : null}
+        {/* Keep the row actions compact so pin and spotlight both fit cleanly. */}
+        <View style={styles.actionColumn}>
+          {item.canPin ? (
+            <TouchableOpacity
+              style={[
+                styles.pinButton,
+                item.isPinned && styles.pinButtonActive,
+              ]}
+              onPress={() => {
+                onPinParticipant?.(item.id);
+                onClose();
+              }}>
+              <Text style={styles.pinButtonText}>
+                {item.isPinned ? 'Pinned' : 'Pin'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
+          {item.canSpotlight ? (
+            <TouchableOpacity
+              style={[
+                styles.spotlightButton,
+                item.isSpotlighted && styles.spotlightButtonActive,
+              ]}
+              onPress={() => {
+                onSpotlightParticipant?.(item.id);
+                onClose();
+              }}>
+              <Text style={styles.spotlightButtonText}>
+                {item.isSpotlighted ? 'Remove' : 'Spotlight'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       </View>
-    </View>
+    ),
+    [onClose, onPinParticipant, onSpotlightParticipant],
   );
 
   return (

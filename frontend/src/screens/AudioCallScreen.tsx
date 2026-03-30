@@ -35,9 +35,7 @@ import type {
 import AudioControlsBar from '../components/AudioControlsBar';
 import ParticipantList from '../components/ParticipantList';
 
-// ============================================================
 // AudioRoomContent (rendered inside LiveKitRoom)
-// ============================================================
 interface AudioRoomContentProps {
   localParticipantId: string;
   localParticipantName: string;
@@ -267,9 +265,7 @@ const AudioRoomContent: React.FC<AudioRoomContentProps> = ({
   );
 };
 
-// ============================================================
 // AudioCallScreen (Main Exported Component)
-// ============================================================
 const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
   roomName,
   participantName,
@@ -462,9 +458,7 @@ const AudioCallScreen: React.FC<AudioCallScreenProps> = ({
   return null;
 };
 
-// ============================================================
 // Styles
-// ============================================================
 const styles = StyleSheet.create({
   centerContainer: {
     flex: 1,

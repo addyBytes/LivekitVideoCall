@@ -1,3 +1,4 @@
+// Same Video Calling But with Meeting Features
 import React, {
   useCallback,
   useEffect,
@@ -62,6 +63,7 @@ interface MeetingStatusWatcherProps {
   onForcedExit: (message: string) => Promise<void>;
 }
 
+// Keep polling the participant status so kicked or ended sessions leave cleanly.
 const MeetingStatusWatcher: React.FC<MeetingStatusWatcherProps> = ({
   roomName,
   participantId,
@@ -131,6 +133,7 @@ interface MeetingHostControlsProps {
   onParticipantKicked: (participantId: string) => void;
 }
 
+// Let the host manage waiting-room requests and active participants from one panel.
 const MeetingHostControls: React.FC<MeetingHostControlsProps> = ({
   roomName,
   hostParticipantId,
@@ -376,6 +379,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
   const [hiddenParticipantIds, setHiddenParticipantIds] = useState<string[]>([]);
   const leavingRef = useRef(false);
 
+  // Clear backend room state before leaving so the meeting can be recreated cleanly.
   const leaveMeetingState = useCallback(
     async (message?: string) => {
       if (leavingRef.current) {
@@ -429,6 +433,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
     [onLeave, participantId, roomName, waitingRequestId],
   );
 
+  // Prepare the audio session before joining the LiveKit meeting.
   useEffect(() => {
     const configureAudio = async () => {
       try {
@@ -466,6 +471,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
     };
   }, []);
 
+  // Create the meeting token for hosts or wait for host admission for guests.
   useEffect(() => {
     const startMeetingFlow = async () => {
       setConnectionState('connecting');
@@ -522,6 +528,7 @@ const MeetingScreen: React.FC<MeetingScreenProps> = ({
     startMeetingFlow();
   }, [isHost, participantName, roomName]);
 
+  // Keep guests polling until they are admitted, removed, or the meeting ends.
   useEffect(() => {
     if (isHost || !waitingRequestId || token) {
       return;

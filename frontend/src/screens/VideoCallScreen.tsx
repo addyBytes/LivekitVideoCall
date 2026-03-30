@@ -54,9 +54,7 @@ import type {
   CreateTokenResponse,
 } from '../types';
 
-// ============================================================
 // Constants
-// ============================================================
 const PREVIEW_RATIO = 16 / 9;
 const ROOM_PARTICIPANTS_POLL_INTERVAL = 2000;
 const TRANSCRIPT_ENTRY_TTL_MS = 6000;
@@ -101,9 +99,7 @@ interface TranscriptStatus {
   message: string;
 }
 
-// ============================================================
 // Room Content (rendered inside LiveKitRoom)
-// ============================================================
 interface RoomContentProps {
   localParticipantId: string;
   localParticipantName?: string;
@@ -162,14 +158,8 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   const suppressAutoPipUntilRef = useRef(0);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const transcriptionActiveRef = useRef(false);
-  const transcriptionSessionIdRef = useRef<string | null>(null);
-  const transcriptionRecorderRef = useRef<any>(null);
-  const transcriptionChunkIntervalRef = useRef<ReturnType<
-    typeof setInterval
-  > | null>(null);
-  const transcriptionChunkQueueRef = useRef<any[]>([]);
-  const transcriptionChunkProcessingRef = useRef(false);
 
+  // Keep only participants that are still active and not hidden in this view.
   const visibleParticipants = useMemo(
     () => {
       return participants.filter(
@@ -185,6 +175,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   useEffect(() => {
     let mounted = true;
 
+    // Poll the backend so stale room entries disappear from the grid quickly.
     const loadActiveRoomParticipants = async () => {
       try {
         const response = await fetch(
@@ -220,6 +211,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     };
   }, [roomName]);
 
+  // Fire a small animated burst whenever a reaction arrives.
   const triggerEmojiBurst = useCallback(
     (emoji: string) => {
       const id = emojiBurstIdRef.current++;
@@ -266,6 +258,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   );
 
   // Explicitly enable camera and mic — only once on mount
+  // Keep PiP state synchronized with the native Android callback stream.
   useEffect(() => {
     if (!isRoomConnected || mediaEnabledRef.current) return;
     mediaEnabledRef.current = true;
@@ -473,6 +466,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     [enableTranscription, localDisplayName, localIdentity],
   );
 
+  // Refresh the local participant list whenever LiveKit track state changes.
   useEffect(() => {
     if (!enableTranscription || Platform.OS !== 'android' || !TranscriptionModule) {
       return;
@@ -559,78 +553,6 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     };
   }, [enableTranscription, handleIncomingTranscriptMessage]);
 
-  const processQueuedTranscriptionChunks = useCallback(async () => {
-    if (
-      transcriptionChunkProcessingRef.current ||
-      !transcriptionActiveRef.current ||
-      !transcriptionSessionIdRef.current
-    ) {
-      return;
-    }
-
-    transcriptionChunkProcessingRef.current = true;
-
-    try {
-      while (
-        transcriptionChunkQueueRef.current.length > 0 &&
-        transcriptionActiveRef.current &&
-        transcriptionSessionIdRef.current
-      ) {
-        const chunk = transcriptionChunkQueueRef.current.shift();
-        if (!chunk) {
-          continue;
-        }
-
-        const response = await fetch(`${API_BASE_URL}/transcription/chunk`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: transcriptionSessionIdRef.current,
-            audioBase64: chunk.audioBase64,
-            bitsPerSample: chunk.metadata?.bitsPerSample,
-            sampleRate: chunk.metadata?.sampleRate,
-            numberOfChannels: chunk.metadata?.numberOfChannels,
-            numberOfFrames: chunk.metadata?.numberOfFrames,
-          }),
-        });
-
-        const data: { text?: string; isFinal?: boolean; error?: string } =
-          await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to process transcription chunk');
-        }
-
-        const text = data.text?.trim();
-        if (!text) {
-          setTranscriptStatus({
-            tone: 'listening',
-            message: 'Listening for speech...',
-          });
-          continue;
-        }
-
-        setTranscriptStatus({
-          tone: 'listening',
-          message: 'Transcribing live...',
-        });
-
-        handleIncomingTranscriptMessage({
-          text,
-          isFinal: !!data.isFinal,
-        });
-      }
-    } catch (error) {
-      console.warn('[Transcription] Failed while processing chunks:', error);
-      setTranscriptStatus({
-        tone: 'error',
-        message: 'Transcription backend is unavailable.',
-      });
-    } finally {
-      transcriptionChunkProcessingRef.current = false;
-    }
-  }, [handleIncomingTranscriptMessage]);
-
   const startLocalTranscription = useCallback(
     async (showAlertOnFailure: boolean) => {
       if (!enableTranscription || transcriptionActiveRef.current) {
@@ -710,6 +632,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     [],
   );
 
+  // Bridge Android speech events into the local caption bubble.
   useEffect(() => {
     transcriptionActiveRef.current = isTranscribing;
 
@@ -914,6 +837,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
     return [...spotlighted, ...remaining];
   }, [spotlightedParticipantIds, visibleParticipants]);
 
+  // Split the grid into swipeable pages of six participants each.
   const participantPages = useMemo(() => {
     const pages: (typeof visibleParticipants)[] = [];
 
@@ -1162,6 +1086,7 @@ export const VideoRoomContent: React.FC<RoomContentProps> = ({
   }, [room, isCameraEnabled, isFrontCamera, localCameraTrackRef]);
 
   // Leave room
+  // Stop any live transcription before disconnecting from the room.
   const handleLeaveRoom = useCallback(async () => {
     try {
       console.log(`\n========================`);
